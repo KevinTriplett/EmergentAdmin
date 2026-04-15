@@ -1,6 +1,6 @@
-# Agent Prompt: auth.js
+# Agent Prompt: auth.ts
 
-Build `src/auth.js` for a Puppeteer automation project.
+Build `src/auth.ts` for a Puppeteer automation project.
 
 ## Exports
 

@@ -1,6 +1,6 @@
-# Agent Prompt: removeSpaceMembers.js
+# Agent Prompt: removeSpaceMembers.ts
 
-Build `src/tasks/removeSpaceMembers.js` for a Puppeteer automation project.
+Build `src/tasks/removeSpaceMembers.ts` for a Puppeteer automation project.
 
 ## Exports
 
@@ -60,7 +60,7 @@ is not found, return immediately with:
 
 1. Navigate to the space members URL.
 2. Wait until `SEL_READY` is present.
-3. Call `loginIfNeeded(page, log)` from auth.js.
+3. Call `loginIfNeeded(page, log)` from auth.ts.
 4. Wait until `SEL_TABLE_MEMBERS` is present inside `SEL_FLYOUT`.
 5. Log: `"Loaded member list for: ${fullSpaceName}"`
 6. If `dryRun`, log: `"DRY RUN — no members will be removed."`

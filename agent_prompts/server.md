@@ -1,6 +1,6 @@
-# Agent Prompt: server.js
+# Agent Prompt: server.ts
 
-Build `src/server.js` for a local Express + WebSocket automation tool.
+Build `src/server.ts` for a local Express + WebSocket automation tool.
 
 ## Dependencies
 

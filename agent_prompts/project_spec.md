@@ -28,12 +28,12 @@ Stage 2 (deferred): Add specific members to a space from a name list.
 ```
 /mn-host-automator
   /src
-    server.js          # Express + WebSocket server
-    auth.js            # Login and session management
+    server.ts          # Express + WebSocket server
+    auth.ts            # Login and session management
     tasks/
-      removeSpaceMembers.js
+      removeSpaceMembers.ts
     utils/
-      browser.js       # Puppeteer launch + teardown helper
+      browser.ts       # Puppeteer launch + teardown helper
   /public
     index.html         # Single-page UI
   .env                 # Credentials — gitignored

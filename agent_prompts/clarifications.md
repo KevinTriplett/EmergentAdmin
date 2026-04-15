@@ -136,7 +136,7 @@ removeSpaceMembers = { success: boolean, error?: string }
 
 ## Miscellaneous
 
-* Add finally block requirement for browser cleanup in server.js.
+* Add finally block requirement for browser cleanup in server.ts.
 * Add an abort mechanism for each task (WebSocket message + flag check between iterations).
 * for headless false, make sure abort mechanism activation is always visible and enabled
 * for headless true add debug messages showing progress with scroll so abort mechanism activation is always visible

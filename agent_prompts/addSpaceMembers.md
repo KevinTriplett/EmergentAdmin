@@ -187,7 +187,8 @@ Check `abortSignal.aborted` BEFORE each iteration in the batch loop.
 On abort:
 - Log: `"Abort requested. Stopped after processing ${i} of ${names.length} members."`
 - Return current results (partial `added` count, accumulated `failed`),
-  with `error: "Aborted by user"`.
+  with `error: "Aborted by user"` for addSpaceMember and
+  `error: "Aborted by user after ${count} removals"` for removeSpaceMembers.
 
 ## Error Handling
 

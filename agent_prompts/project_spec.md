@@ -53,7 +53,7 @@ Stage 2 (deferred): Add specific members to a space from a name list.
 - Server sets a shared abort flag.
 - Task checks the flag between each iteration of its loop.
 - On abort: task stops, closes browser, returns partial result
-  with `error: "Aborted by user after N removals"`.
+  with `Aborted by user after ${count} removals`.
 - Abort button is always visible and enabled while a task is running.
 
 ## Return Types

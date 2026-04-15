@@ -137,7 +137,7 @@ server sets it to true when it receives an abort WebSocket message.
 Check `abortSignal.aborted` BEFORE each removal attempt (step g).
 On abort:
 - Log: `"Abort requested. Stopped after ${count} removals."`
-- Return `{ success: true, removed: count, error: "Aborted by user" }`
+- Return `{ success: true, removed: count, error: "Aborted by user after ${count} removals" }`
 
 ## Error Handling
 

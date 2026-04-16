@@ -125,12 +125,15 @@ describe('removeSpaceMembers', () => {
   it('returns abort result with harmonized message after logging would-remove', async () => {
     const goto = vi.fn().mockResolvedValue(undefined);
     const waitForSelector = vi.fn().mockResolvedValue(undefined);
+    const waitForFunction = vi.fn().mockResolvedValue(undefined);
+    const evaluate = vi.fn().mockResolvedValue(1);
     const memberRow = mockRow('222', 'Member Two', 'https://emergent-commons.mn.co/u/2');
     const $$ = vi.fn().mockResolvedValue([memberRow]);
     const $ = vi.fn().mockResolvedValue({
       evaluate: vi.fn().mockResolvedValue(undefined),
     });
-    const page = { goto, waitForSelector, $$, $ } as unknown as Page;
+    const page = { goto, waitForSelector, waitForFunction, evaluate, $$, $ } as unknown as Page;
+    const sleep = vi.fn().mockResolvedValue(undefined);
 
     const result = await removeSpaceMembers({
       page,
@@ -138,6 +141,7 @@ describe('removeSpaceMembers', () => {
       dryRun: true,
       log,
       abortSignal: { aborted: true },
+      sleep,
     });
 
     expect(result).toEqual({

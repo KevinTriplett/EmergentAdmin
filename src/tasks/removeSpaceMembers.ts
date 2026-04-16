@@ -32,7 +32,8 @@ const SPACE_IDS: Record<string, string> = {
 // === ADMIN IDS — Never remove these members ===
 const ADMIN_IDS = ['7698608', '12314607'];
 
-const SCROLL_LOAD_MS = 2000;
+const SCROLL_LOAD_MS = 3000;
+const SCROLL_MAX_RETRIES = 5;
 const WAIT_SHORT_MS = 15_000;
 const WAIT_ROW_UPDATE_MS = 30_000;
 const OPTIONAL_ACK_TIMEOUT_MS = 1200;
@@ -53,7 +54,7 @@ function pluralSuffix(n: number, singular: string, plural: string): string {
 
 const msg = {
   unknownSpace: (name: string) => `Unknown space: "${name}".`,
-  memberListLoaded: (space: string) => `Member list loaded for "${space}".`,
+  memberListLoaded: (space: string, count: number) => `Member list loaded for "${space}" (${count} rows).`,
   dryRunNoRemovals: () => 'Dry run: no members will actually be removed.',
   abortAfterRemovals: (n: number) =>
     `Abort requested; stopping after ${n} removal${pluralSuffix(n, '', 's')}.`,
@@ -63,9 +64,8 @@ const msg = {
     `Removing ${memberRef(name, memberId)}.`,
   removalComplete: (ordinal: number, name: string) =>
     `Removal ${ordinal} complete: ${name}.`,
-  staleGuard: (name: string, memberId: string) =>
-    `STALE GUARD: ${memberRef(name, memberId)} is still first in the list after removal. Halting.`,
-  timeoutRowUpdate: () => 'Timed out waiting for the member list to update after removal.',
+  removalNotConfirmed: (name: string, memberId: string) =>
+    `Removal not confirmed: ${memberRef(name, memberId)} is still in the member list. MN may have rejected the removal.`,
   clicking: (label: string) => `Clicking ${label}…`,
 } as const;
 
@@ -305,23 +305,48 @@ async function settleAfterDryRunInteraction(
 }
 
 async function scrollFlyout(page: Page): Promise<void> {
-  const flyout = await page.$(SEL_FLYOUT);
-  if (!flyout) return;
-  try {
-    await flyout.evaluate((el) => { el.scrollTop = el.scrollHeight; });
-  } finally {
-    await disposeHandle(flyout);
+  await page.evaluate((sel) => {
+    const flyout = document.querySelector(sel);
+    if (!flyout) return;
+    flyout.scrollTop = flyout.scrollHeight;
+  }, SEL_FLYOUT);
+}
+
+async function countMemberRows(page: Page): Promise<number> {
+  return page.evaluate((sel) => document.querySelectorAll(sel).length, SEL_MEMBER_ROW);
+}
+
+/**
+ * Scroll the flyout repeatedly until no new member rows appear for
+ * SCROLL_MAX_RETRIES consecutive attempts. Returns total row count.
+ */
+async function scrollUntilStable(
+  page: Page, sleep: (ms: number) => Promise<void>,
+): Promise<number> {
+  let previousCount = await countMemberRows(page);
+  let stableAttempts = 0;
+  while (stableAttempts < SCROLL_MAX_RETRIES) {
+    await scrollFlyout(page);
+    await sleep(SCROLL_LOAD_MS);
+    const current = await countMemberRows(page);
+    if (current > previousCount) {
+      previousCount = current;
+      stableAttempts = 0;
+    } else {
+      stableAttempts++;
+    }
   }
+  return previousCount;
 }
 
 async function pickFirstEligibleRow(
-  page: Page, dryRun: boolean, dryRunSeen: Set<string>,
+  page: Page, processedIds: Set<string>,
 ): Promise<{ row: ElementHandle<Element>; meta: RowMeta } | null> {
   const rows = await page.$$(SEL_MEMBER_ROW);
   for (const row of rows) {
     const meta = await readRowMeta(row);
     if (ADMIN_IDS.includes(meta.memberId)) continue;
-    if (dryRun && dryRunSeen.has(meta.memberId)) continue;
+    if (processedIds.has(meta.memberId)) continue;
     return { row, meta };
   }
   return null;
@@ -358,7 +383,7 @@ export async function removeSpaceMembers({
 
   const url = `https://emergent-commons.mn.co/spaces/${spaceId}/admin/members/all`;
   let removed = 0;
-  const dryRunSeen = new Set<string>();
+  const processedIds = new Set<string>();
 
   try {
     await page.goto(url, { waitUntil: 'networkidle2' });
@@ -366,26 +391,23 @@ export async function removeSpaceMembers({
     await page.waitForSelector(SEL_READY, { timeout: 60_000 });
     await page.waitForSelector(SEL_FLYOUT, { timeout: 60_000 });
     await page.waitForSelector(`${SEL_FLYOUT} ${SEL_TABLE_MEMBERS}`, { timeout: 60_000 });
-    await log(msg.memberListLoaded(fullSpaceName));
+
+    const totalLoaded = await scrollUntilStable(page, sleep);
+    await log(msg.memberListLoaded(fullSpaceName, totalLoaded));
     if (dryRun) await log(msg.dryRunNoRemovals());
 
     while (true) {
       if (abortSignal.aborted) return logAbortAndReturn(log, removed);
 
-      let picked = await pickFirstEligibleRow(page, dryRun, dryRunSeen);
-      if (!picked) {
-        await scrollFlyout(page);
-        await sleep(SCROLL_LOAD_MS);
-        picked = await pickFirstEligibleRow(page, dryRun, dryRunSeen);
-        if (!picked) break;
-      }
+      const picked = await pickFirstEligibleRow(page, processedIds);
+      if (!picked) break;
 
       const { row, meta } = picked;
       const { name, memberId } = meta;
 
       if (abortSignal.aborted) return logAbortAndReturn(log, removed);
 
-      dryRunSeen.add(memberId);
+      processedIds.add(memberId);
 
       try {
         await log(dryRun ? msg.dryRunWouldRemove(name, memberId) : msg.removingMember(name, memberId));
@@ -404,48 +426,12 @@ export async function removeSpaceMembers({
 
       try {
         await page.waitForFunction(
-          ({ memberId: id, adminList }) => {
-            const rows = Array.from(document.querySelectorAll('[data-member-item]'));
-            for (const el of rows) {
-              const mid = el.getAttribute('data-member-item') ?? '';
-              if (adminList.includes(mid)) continue;
-              if (mid !== id) return true;
-              return false;
-            }
-            return true;
-          },
+          (id) => document.querySelector(`[data-member-item="${id}"]`) === null,
           { timeout: WAIT_ROW_UPDATE_MS },
-          { memberId, adminList: ADMIN_IDS },
+          memberId,
         );
       } catch {
-        return logErrorAndFail(log, removed, msg.timeoutRowUpdate());
-      }
-
-      const nextRows = await page.$$(SEL_MEMBER_ROW);
-      let nextFirst: RowMeta | null = null;
-      for (const r of nextRows) {
-        const m = await readRowMeta(r);
-        if (ADMIN_IDS.includes(m.memberId)) continue;
-        nextFirst = m;
-        break;
-      }
-
-      if (!nextFirst) {
-        await scrollFlyout(page);
-        await sleep(SCROLL_LOAD_MS);
-        const again = await pickFirstEligibleRow(page, dryRun, dryRunSeen);
-        if (!again) {
-          removed += 1;
-          await log(msg.removalComplete(removed, name));
-          break;
-        }
-        removed += 1;
-        await log(msg.removalComplete(removed, name));
-        continue;
-      }
-
-      if (nextFirst.memberId === memberId) {
-        return logErrorAndFail(log, removed, msg.staleGuard(name, memberId));
+        return logErrorAndFail(log, removed, msg.removalNotConfirmed(name, memberId));
       }
 
       removed += 1;

@@ -72,6 +72,19 @@ describe('createApp', () => {
     removeSpaceMembers.mockReset();
   });
 
+  function buildMockPage(): Page {
+    return {
+      setUserAgent: vi.fn().mockResolvedValue(undefined),
+      setExtraHTTPHeaders: vi.fn().mockResolvedValue(undefined),
+      evaluate: vi.fn().mockResolvedValue({
+        userAgent: 'test-agent',
+        platform: 'test-platform',
+        language: 'en-US',
+      }),
+      url: vi.fn().mockReturnValue('about:blank'),
+    } as unknown as Page;
+  }
+
   it('returns 400 when fullSpaceName is missing', async () => {
     launchBrowser.mockRejectedValue(new Error('should not launch'));
     const server = createApp({ launchBrowser, removeSpaceMembers });
@@ -111,7 +124,7 @@ describe('createApp', () => {
       return { success: true, removed: 0 };
     });
 
-    const mockPage = {} as unknown as Page;
+    const mockPage = buildMockPage();
     newPage.mockResolvedValue(mockPage);
     launchBrowser.mockResolvedValue({ newPage, close });
 
@@ -154,7 +167,7 @@ describe('createApp', () => {
   });
 
   it('returns 200 with task result on success', async () => {
-    const mockPage = {} as unknown as Page;
+    const mockPage = buildMockPage();
     newPage.mockResolvedValue(mockPage);
     launchBrowser.mockResolvedValue({ newPage, close });
     removeSpaceMembers.mockResolvedValue({ success: true, removed: 0 });
@@ -186,7 +199,7 @@ describe('createApp', () => {
   });
 
   it('defaults headless and dryRun to true when omitted', async () => {
-    const mockPage = {} as unknown as Page;
+    const mockPage = buildMockPage();
     newPage.mockResolvedValue(mockPage);
     launchBrowser.mockResolvedValue({ newPage, close });
     removeSpaceMembers.mockResolvedValue({ success: true, removed: 0 });

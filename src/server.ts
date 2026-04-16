@@ -9,6 +9,8 @@ import { launchBrowser as defaultLaunchBrowser } from './utils/browser.js';
 import { removeSpaceMembers as defaultRemoveSpaceMembers } from './tasks/removeSpaceMembers.js';
 
 const publicDir = path.join(process.cwd(), 'public');
+const DEFAULT_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36';
 
 export type BrowserHandle = {
   newPage: () => Promise<Page>;
@@ -83,6 +85,16 @@ export function createApp(deps: CreateAppDeps): http.Server {
     try {
       browser = await deps.launchBrowser(headless);
       const page = await browser.newPage();
+      await page.setUserAgent(DEFAULT_USER_AGENT);
+      await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+      const runtimeInfo = await page.evaluate(() => ({
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        language: navigator.language,
+      }));
+      log(
+        `Puppeteer runtime: userAgent="${runtimeInfo.userAgent}" platform="${runtimeInfo.platform}" language="${runtimeInfo.language}" url="${page.url()}"`,
+      );
       const result = await deps.removeSpaceMembers({
         page,
         fullSpaceName: fullSpaceName.trim(),

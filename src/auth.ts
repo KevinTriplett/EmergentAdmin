@@ -22,6 +22,9 @@ export type LoginDeps = {
   login?: (page: Page, log: LogFn) => Promise<{ success: true }>;
 };
 
+const AUTH_SHELL_WAIT_MS = 10_000;
+const CHALLENGE_CLEAR_WAIT_MS = 90_000;
+
 /** Clicks that trigger a document navigation often kill the context before `evaluate` returns. */
 function isExecutionContextDestroyedError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -30,6 +33,11 @@ function isExecutionContextDestroyedError(err: unknown): boolean {
     msg.includes('Cannot find context with specified id') ||
     msg.includes('Target closed')
   );
+}
+
+function isDetachedFrameError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('detached Frame') || msg.includes('Attempted to use detached Frame');
 }
 
 async function clickFirstWithExactText(page: Page, text: string): Promise<void> {
@@ -132,6 +140,46 @@ async function fillPassword(page: Page, password: string): Promise<void> {
   );
 }
 
+async function handleGdprConsentIfPresent(page: Page, log: LogFn): Promise<void> {
+  await log('Handling GDPR consent...');
+  const gdpr = await page.$(SEL_GDPR_CONSENT);
+  if (gdpr) {
+    try {
+      await gdpr.click();
+    } finally {
+      if (typeof gdpr.dispose === 'function') {
+        await gdpr.dispose();
+      }
+    }
+  } else {
+    await log('No GDPR consent dialog — skipping');
+  }
+}
+
+async function waitForChallengeClearIfPresent(page: Page, log: LogFn): Promise<void> {
+  const title = await page.title().catch(() => '');
+  if (!title.includes('Just a moment')) {
+    return;
+  }
+
+  await log('Detected challenge page; waiting for clearance...');
+  await page.waitForFunction(
+    ({ signIn, signedIn, landing }) => {
+      if (!document.title.includes('Just a moment')) {
+        return true;
+      }
+      return (
+        Boolean(document.querySelector(signIn)) ||
+        Boolean(document.querySelector(signedIn)) ||
+        Boolean(document.querySelector(landing))
+      );
+    },
+    { timeout: CHALLENGE_CLEAR_WAIT_MS },
+    { signIn: SEL_SIGN_IN, signedIn: SEL_SIGNED_IN, landing: SEL_LANDING },
+  );
+  await log('Challenge cleared. Continuing auth checks...');
+}
+
 export async function login(page: Page, log: LogFn): Promise<{ success: true }> {
   const email = process.env.MN_EMAIL;
   const password = process.env.MN_PASSWORD;
@@ -145,15 +193,6 @@ export async function login(page: Page, log: LogFn): Promise<{ success: true }> 
 
     await log('Waiting for app shell...');
     await page.waitForSelector(SEL_SIGN_IN, { timeout: 60_000 });
-
-    await log('Handling GDPR consent...');
-    const gdpr = await page.$(SEL_GDPR_CONSENT);
-    if (gdpr) {
-      await gdpr.click();
-      await gdpr.dispose();
-    } else {
-      await log('No GDPR consent dialog — skipping');
-    }
 
     await log('Entering email...');
     await fillEmail(page, email);
@@ -202,6 +241,73 @@ export async function loginIfNeeded(
   log: LogFn,
   deps: LoginDeps = {},
 ): Promise<void> {
+  await log('Waiting for app shell...');
+  await waitForChallengeClearIfPresent(page, log);
+  const shellSelectors = { signIn: SEL_SIGN_IN, signedIn: SEL_SIGNED_IN, landing: SEL_LANDING };
+  let shellReady = false;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await page.waitForFunction(
+        ({ signIn, signedIn, landing }) =>
+          Boolean(document.querySelector(signIn)) ||
+          Boolean(document.querySelector(signedIn)) ||
+          Boolean(document.querySelector(landing)),
+        { timeout: AUTH_SHELL_WAIT_MS },
+        shellSelectors,
+      );
+      shellReady = true;
+      break;
+    } catch (err) {
+      if (isDetachedFrameError(err) || isExecutionContextDestroyedError(err)) {
+        await log(`Auth shell wait interrupted by navigation/frame swap (attempt ${attempt}/3).`);
+        if (attempt < 3) {
+          await page
+            .waitForNavigation({ waitUntil: 'domcontentloaded', timeout: AUTH_SHELL_WAIT_MS })
+            .catch(() => undefined);
+          continue;
+        }
+      }
+
+      try {
+        const shellState = await page.evaluate(
+          ({ ready, signIn, signedIn, landing, gdpr }) => ({
+            url: location.href,
+            title: document.title,
+            bodyClass: document.body?.className ?? '',
+            readyFound: Boolean(document.querySelector(ready)),
+            signInFound: Boolean(document.querySelector(signIn)),
+            signedInFound: Boolean(document.querySelector(signedIn)),
+            landingFound: Boolean(document.querySelector(landing)),
+            gdprFound: Boolean(document.querySelector(gdpr)),
+          }),
+          {
+            ready: SEL_READY,
+            signIn: SEL_SIGN_IN,
+            signedIn: SEL_SIGNED_IN,
+            landing: SEL_LANDING,
+            gdpr: SEL_GDPR_CONSENT,
+          },
+        );
+        await log(
+          `Auth shell timeout debug: url=${shellState.url} title="${shellState.title}" bodyClass="${shellState.bodyClass}"`,
+        );
+        await log(
+          `Auth shell timeout debug: ready=${shellState.readyFound} signIn=${shellState.signInFound} signedIn=${shellState.signedInFound} landing=${shellState.landingFound} gdpr=${shellState.gdprFound}`,
+        );
+      } catch (debugErr) {
+        const debugMsg = debugErr instanceof Error ? debugErr.message : String(debugErr);
+        await log(`Auth shell timeout debug unavailable: ${debugMsg}`);
+        await log(`Auth shell timeout fallback URL: ${page.url()}`);
+      }
+
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`Timed out waiting for auth shell. ${message}`, { cause: err });
+    }
+  }
+  if (!shellReady) {
+    throw new Error('Timed out waiting for auth shell after retries.');
+  }
+
   const landing = await page.$(SEL_LANDING);
   if (landing) {
     if (typeof landing.dispose === 'function') {
@@ -217,6 +323,9 @@ export async function loginIfNeeded(
     }
     await page.waitForSelector(SEL_SIGN_IN, { timeout: 60_000 });
   }
+
+  await handleGdprConsentIfPresent(page, log);
+
   const signIn = await page.$(SEL_SIGN_IN);
   if (signIn) {
     if (typeof signIn.dispose === 'function') {
@@ -226,5 +335,15 @@ export async function loginIfNeeded(
     await runLogin(page, log);
     return;
   }
-  await log('Already logged in — skipping login.');
+
+  const signedIn = await page.$(SEL_SIGNED_IN);
+  if (signedIn) {
+    if (typeof signedIn.dispose === 'function') {
+      await signedIn.dispose();
+    }
+    await log('Already logged in — skipping login.');
+    return;
+  }
+
+  throw new Error('Unknown authentication state: neither sign-in nor signed-in shell detected.');
 }

@@ -23,7 +23,11 @@ describe('loginIfNeeded', () => {
   it('invokes injected login when sign-in body is present', async () => {
     const fakeHandle = {};
     const page = {
-      $: vi.fn().mockResolvedValue(fakeHandle),
+      $: vi.fn((sel: string) => {
+        if (sel.includes('communities-landing')) return Promise.resolve(null);
+        if (sel.includes('auth-sign_in')) return Promise.resolve(fakeHandle);
+        return Promise.resolve(null);
+      }),
     } as unknown as Page;
 
     const login = vi.fn().mockResolvedValue({ success: true });

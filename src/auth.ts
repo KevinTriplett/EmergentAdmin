@@ -3,10 +3,12 @@ import type { Page } from 'puppeteer';
 // === CSS SELECTORS — UPDATE THESE IF MN CHANGES ITS DOM ===
 const SEL_READY = 'body.pace-done #community-app';
 const SEL_SIGN_IN = 'body.auth-sign_in';
+const SEL_LANDING = 'body.communities-landing';
 const SEL_GDPR_CONSENT = '#c-p-bn';
 const SEL_SIGNED_IN = 'body.communities-app';
 
 // === TEXT LABELS — UPDATE THESE IF MN CHANGES ITS UI TEXT ===
+const TXT_LANDING_SIGN_IN = 'Sign In';
 const TXT_EMAIL = 'Email';
 const TXT_NEXT = 'Next';
 const TXT_SIGN_IN_WITH_PASSWORD = 'Sign In with Password';
@@ -19,6 +21,16 @@ export type LogFn = (message: string) => void | Promise<void>;
 export type LoginDeps = {
   login?: (page: Page, log: LogFn) => Promise<{ success: true }>;
 };
+
+/** Clicks that trigger a document navigation often kill the context before `evaluate` returns. */
+function isExecutionContextDestroyedError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.includes('Execution context was destroyed') ||
+    msg.includes('Cannot find context with specified id') ||
+    msg.includes('Target closed')
+  );
+}
 
 async function clickFirstWithExactText(page: Page, text: string): Promise<void> {
   const clicked = await page.evaluate((label) => {
@@ -37,28 +49,35 @@ async function clickFirstWithExactText(page: Page, text: string): Promise<void> 
 }
 
 async function fillEmail(page: Page, email: string): Promise<void> {
+  /* No nested `function` declarations here — TS/esbuild can inject `__name()` into
+   * serialized `page.evaluate` bodies, which throws in the browser ("__name is not defined"). */
   await page.evaluate(
     (emailLabel, value) => {
-      function findEmailInput(): HTMLInputElement | null {
-        for (const el of document.querySelectorAll('input')) {
-          const ph = el.getAttribute('placeholder') ?? '';
-          const aria = el.getAttribute('aria-label') ?? '';
-          if (ph.includes(emailLabel) || aria.includes(emailLabel)) {
-            return el as HTMLInputElement;
-          }
+      let input: HTMLInputElement | null = null;
+      for (const el of document.querySelectorAll('input')) {
+        const inp = el as HTMLInputElement;
+        const ph = inp.getAttribute('placeholder') || '';
+        const aria = inp.getAttribute('aria-label') || '';
+        if (ph.includes(emailLabel) || aria.includes(emailLabel)) {
+          input = inp;
+          break;
         }
+      }
+      if (!input) {
         for (const label of document.querySelectorAll('label')) {
-          if (label.textContent?.includes(emailLabel)) {
+          const text = label.textContent || '';
+          if (text.includes(emailLabel)) {
             const forId = label.getAttribute('for');
             if (forId) {
-              const input = document.getElementById(forId);
-              if (input instanceof HTMLInputElement) return input;
+              const el = document.getElementById(forId);
+              if (el && el.tagName === 'INPUT') {
+                input = el as HTMLInputElement;
+                break;
+              }
             }
           }
         }
-        return null;
       }
-      const input = findEmailInput();
       if (!input) throw new Error('email input not found');
       input.focus();
       input.value = value;
@@ -73,27 +92,35 @@ async function fillEmail(page: Page, email: string): Promise<void> {
 async function fillPassword(page: Page, password: string): Promise<void> {
   await page.evaluate(
     (pwdLabel, value) => {
-      function findPasswordInput(): HTMLInputElement | null {
-        for (const el of document.querySelectorAll('input')) {
-          if (el.getAttribute('type') !== 'password') continue;
-          const ph = el.getAttribute('placeholder') ?? '';
-          const aria = el.getAttribute('aria-label') ?? '';
-          if (ph.includes(pwdLabel) || aria.includes(pwdLabel)) {
-            return el as HTMLInputElement;
-          }
+      let input: HTMLInputElement | null = null;
+      for (const el of document.querySelectorAll('input')) {
+        const inp = el as HTMLInputElement;
+        if (inp.getAttribute('type') !== 'password') continue;
+        const ph = inp.getAttribute('placeholder') || '';
+        const aria = inp.getAttribute('aria-label') || '';
+        if (ph.includes(pwdLabel) || aria.includes(pwdLabel)) {
+          input = inp;
+          break;
         }
+      }
+      if (!input) {
         for (const label of document.querySelectorAll('label')) {
-          if (label.textContent?.includes(pwdLabel)) {
+          const text = label.textContent || '';
+          if (text.includes(pwdLabel)) {
             const forId = label.getAttribute('for');
             if (forId) {
-              const input = document.getElementById(forId);
-              if (input instanceof HTMLInputElement) return input;
+              const el = document.getElementById(forId);
+              if (el && el.tagName === 'INPUT') {
+                input = el as HTMLInputElement;
+                break;
+              }
             }
           }
         }
-        return document.querySelector('input[type="password"]') as HTMLInputElement | null;
       }
-      const input = findPasswordInput();
+      if (!input) {
+        input = document.querySelector('input[type="password"]') as HTMLInputElement | null;
+      }
       if (!input) throw new Error('password input not found');
       input.focus();
       input.value = value;
@@ -117,7 +144,6 @@ export async function login(page: Page, log: LogFn): Promise<{ success: true }> 
     await page.goto(LOGIN_URL, { waitUntil: 'networkidle2' });
 
     await log('Waiting for app shell...');
-    await page.waitForSelector(SEL_READY, { timeout: 60_000 });
     await page.waitForSelector(SEL_SIGN_IN, { timeout: 60_000 });
 
     await log('Handling GDPR consent...');
@@ -137,9 +163,15 @@ export async function login(page: Page, log: LogFn): Promise<{ success: true }> 
 
     await log('Selecting password sign-in...');
     await page.waitForFunction(
-      (t) => {
-        const nodes = Array.from(document.querySelectorAll('a, button, span'));
-        return nodes.some((n) => n.textContent?.trim() === t);
+      (label) => {
+        const nodes = document.querySelectorAll('a, button, span');
+        for (let i = 0; i < nodes.length; i++) {
+          const tc = nodes[i].textContent;
+          if (tc && tc.trim() === label) {
+            return true;
+          }
+        }
+        return false;
       },
       { timeout: 30_000 },
       TXT_SIGN_IN_WITH_PASSWORD,
@@ -170,6 +202,21 @@ export async function loginIfNeeded(
   log: LogFn,
   deps: LoginDeps = {},
 ): Promise<void> {
+  const landing = await page.$(SEL_LANDING);
+  if (landing) {
+    if (typeof landing.dispose === 'function') {
+      await landing.dispose();
+    }
+    await log('Landing page — navigating to sign-in page...');
+    try {
+      await clickFirstWithExactText(page, TXT_LANDING_SIGN_IN);
+    } catch (err) {
+      if (!isExecutionContextDestroyedError(err)) {
+        throw err;
+      }
+    }
+    await page.waitForSelector(SEL_SIGN_IN, { timeout: 60_000 });
+  }
   const signIn = await page.$(SEL_SIGN_IN);
   if (signIn) {
     if (typeof signIn.dispose === 'function') {

@@ -1,6 +1,7 @@
 import type { ElementHandle, Page } from 'puppeteer';
 import { loginIfNeeded, type LogFn } from '../auth.js';
 import { abortedRemovalMessage } from '../abortRemoval.js';
+import { log } from 'console';
 
 // === CSS SELECTORS — UPDATE THESE IF MN CHANGES ITS DOM ===
 const SEL_READY = 'body.pace-done #community-app';
@@ -196,8 +197,9 @@ export async function removeSpaceMembers({
         };
       }
 
+      log('Picking first eligible row...');
       let picked = await pickFirstEligibleRow(page, dryRun, dryRunSeen);
-
+      log(`Picked: ${JSON.stringify(picked)}`);
       if (!picked) {
         await scrollFlyout(page);
         await sleep(SCROLL_LOAD_MS);

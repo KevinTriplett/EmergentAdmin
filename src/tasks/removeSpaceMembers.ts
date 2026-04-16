@@ -11,7 +11,7 @@ const SEL_MEMBER_DROPDOWN = '.actions-region a.mighty-drop-down-toggle';
 const SEL_MEMBER_DROPDOWN_MORE = '#menu-list-item-more-host-FlexSpace-actions .toggle-child-expanded-button';
 const SEL_REMOVE_FROM_SPACE = '#menu-list-item-remove-from-sub-space';
 const SEL_MODAL_CONFIRM = '#modal-content-region .modal-confirm-button';
-const SEL_MODAL_REGION = '#modal-content-region';
+const SEL_MODAL_CANCEL = '#modal-content-region .modal-reject-button';
 
 // === SPACE IDS — Maps display name to MN space ID ===
 const SPACE_IDS: Record<string, string> = {
@@ -29,7 +29,10 @@ const SPACE_IDS: Record<string, string> = {
 };
 
 // === ADMIN IDS — Never remove these members ===
-const ADMIN_IDS = ['7698608', '12314607'];
+const ADMIN_IDS = [
+  '7698608',
+  '12314607',
+];
 
 const SCROLL_LOAD_MS = 2000;
 const WAIT_SHORT_MS = 15_000;
@@ -80,6 +83,7 @@ const clickTarget = {
   moreActions: 'more actions control',
   removeFromSpace: 'Remove from space',
   confirmRemoval: 'confirm removal',
+  cancel: 'cancel',
 } as const;
 
 /** Puppeteer step key → stable “not found” copy (capitalized product wording). */
@@ -88,6 +92,7 @@ const STEP_NOT_FOUND: Record<keyof typeof clickTarget, string> = {
   moreActions: 'More actions control not found',
   removeFromSpace: 'Remove from space control not found',
   confirmRemoval: 'Confirm removal control not found',
+  cancel: 'Cancel control not found',
 };
 
 export type RemoveSpaceMembersArgs = {
@@ -388,6 +393,7 @@ async function performRemoval(
   page: Page,
   row: ElementHandle<Element>,
   log: LogFn,
+  dryRun: boolean,
   logLevel: LogLevel,
 ): Promise<void> {
   await ensureMemberMenuOpened(page, row, log, logLevel);
@@ -409,6 +415,17 @@ async function performRemoval(
     WAIT_SHORT_MS,
     logLevel,
   );
+
+  if (dryRun) {
+    await waitDomThenClickPageControl(
+      page,
+      SEL_MODAL_CANCEL,
+      'cancel',
+      log,
+      WAIT_SHORT_MS,
+      logLevel,
+    );
+  }
 
   await waitDomThenClickPageControl(
     page,
@@ -536,21 +553,23 @@ export async function removeSpaceMembers({
         return logAbortAndReturn(log, removed);
       }
 
-      if (dryRun) {
-        await log(msg.dryRunWouldRemove(name, memberId));
-        dryRunSeen.add(memberId);
-        await row.dispose().catch(() => undefined);
-        continue;
-      }
+      dryRunSeen.add(memberId);
 
       try {
-        await log(msg.removingMember(name, memberId));
-        await performRemoval(page, row, log, logLevel);
+        await log(dryRun ?
+          msg.dryRunWouldRemove(name, memberId) :
+          msg.removingMember(name, memberId)
+        );
+        await performRemoval(page, row, log, dryRun, logLevel);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return logErrorAndFail(log, removed, message);
       } finally {
         await row.dispose().catch(() => undefined);
+      }
+
+      if (dryRun) {
+        continue;
       }
 
       try {

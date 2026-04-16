@@ -232,9 +232,12 @@
             message.includes('HALT')
           ) {
             line.classList.add('errorish');
-          } else if (message.startsWith('WOULD REMOVE')) {
+          } else if (
+            /^dry run: would remove/i.test(message) ||
+            message.startsWith('WOULD REMOVE')
+          ) {
             line.classList.add('would');
-          } else if (message.startsWith('Removed')) {
+          } else if (/^removal \d+ complete:/i.test(message) || message.startsWith('Removed')) {
             line.classList.add('removed');
           }
           logPanel.appendChild(line);

@@ -51,7 +51,7 @@ describe('removeSpaceMembers', () => {
     expect(result).toEqual({
       success: false,
       removed: 0,
-      error: 'Unknown space: "Not A Real Space"',
+      error: 'Unknown space: "Not A Real Space".',
     });
     expect(loginIfNeeded).not.toHaveBeenCalled();
   });
@@ -103,8 +103,10 @@ describe('removeSpaceMembers', () => {
     );
     expect(loginIfNeeded).toHaveBeenCalledWith(page, log);
     expect(result).toEqual({ success: true, removed: 0 });
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('WOULD REMOVE'));
-    expect(log).toHaveBeenCalledWith('DRY RUN — no members will be removed.');
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/dry run: would remove/i));
+    expect(log).toHaveBeenCalledWith(
+      'Dry run: no members will actually be removed.',
+    );
   });
 
   it('returns abort result with harmonized message after logging would-remove', async () => {
@@ -130,6 +132,6 @@ describe('removeSpaceMembers', () => {
       removed: 0,
       error: 'Aborted by user after 0 removals',
     });
-    expect(log).toHaveBeenCalledWith('Abort requested. Stopped after 0 removals.');
+    expect(log).toHaveBeenCalledWith('Abort requested; stopping after 0 removals.');
   });
 });

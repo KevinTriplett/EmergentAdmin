@@ -131,3 +131,8 @@ For every task, follow this sequence:
 - Never use `any` types (in TypeScript) or equivalent escape hatches to avoid dealing with type constraints, unless isolated and justified.
 - Never commit code with known failing tests.
 - Never treat test code as second-class. Test code is production code. It gets the same quality standards.
+
+## 7. Don't Repeat Yourself (DRY)
+
+- use good DRY principles
+- roll-in log messages using programmatic grammer handling if that will significantly decrease the number of log statements

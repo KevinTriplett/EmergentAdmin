@@ -274,7 +274,7 @@
             reconnectTimer = null;
           }
           wsDisconnect.hidden = true;
-          ws = new WebSocket('ws://' + location.host);
+          ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
 
           ws.addEventListener('message', function (ev) {
             try {

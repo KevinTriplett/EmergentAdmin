@@ -7,6 +7,14 @@ Build `public/index.html` — a single-file vanilla HTML/CSS/JS frontend.
 Only the "Remove Space Members" section. The "Add Members" section
 will be added in Stage 2.
 
+When removing members from ALL spaces, confirm this action.
+
+## Stage 2 Scope
+
+Convert the code to a server deployed webapp running on Debian. Create a
+deploy.md file listing the steps to prepare the server and how to push
+from the github repo to the server.
+
 ## Layout
 
 ### Header
@@ -36,6 +44,7 @@ will be added in Stage 2.
 
 **Action button:**
 - Label: "Remove All Non-Admin Members"
+- Label: "Remove From ALL Spaces"
 - Disabled while any task is running.
 - Clicking it sends POST `/run/remove-space-members` with body:
   ```json

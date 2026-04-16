@@ -13,18 +13,15 @@ async function removeSpaceMembers({ page, fullSpaceName, dryRun = true, log, abo
 ```js
 // === CSS SELECTORS — UPDATE THESE IF MN CHANGES ITS DOM ===
 const SEL_READY = 'body.pace-done #community-app';
-const SEL_SIGN_IN = 'body.auth-sign_in';
 const SEL_FLYOUT = '#flyout-main-content';
 const SEL_TABLE_MEMBERS = '.all-members-list-items';
 const SEL_MEMBER_ROW = '[data-member-item]';
 const SEL_MEMBER_DROPDOWN = '.actions-region a.mighty-drop-down-toggle';
-const SEL_MEMBER_DROPDOWN_MORE = '.actions-region .mighty-drop-down-menu-region .menu-list-item-more-host-FlexSpace-actions .toggle-child-expanded-button';
-
-// === TEXT LABELS — UPDATE THESE IF MN CHANGES ITS UI TEXT ===
-const TXT_REMOVE_MEMBER = 'Remove from Space';
-const TXT_REMOVE_CONFIRM = 'Remove This Member';
-const TXT_REMOVE_CANCEL = 'Cancel';
-const TXT_REMOVE_OKAY = 'Okay';
+const SEL_MEMBER_DROPDOWN_MORE = '#menu-list-item-more-host-FlexSpace-actions .toggle-child-expanded-button';
+const SEL_REMOVE_FROM_SPACE = '#menu-list-item-remove-from-sub-space';
+const SEL_MODAL_CONFIRM = '#modal-content-region .modal-confirm-button';
+const SEL_MODAL_CANCEL = '#modal-content-region .modal-reject-button';
+const SEL_MODAL_REGION = '#modal-content-region';
 
 // === SPACE IDS — Maps display name to MN space ID ===
 const SPACE_IDS = {

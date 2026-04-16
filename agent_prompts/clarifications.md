@@ -51,7 +51,8 @@ spaceIds = {
 }
 
 adminIds = [
-    '7698608'
+    '7698608',
+    '12314607'
 ]
 
 ### members page

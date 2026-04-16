@@ -32,7 +32,7 @@ const SPACE_IDS: Record<string, string> = {
 };
 
 // === ADMIN IDS — Never remove these members ===
-const ADMIN_IDS = ['7698608'];
+const ADMIN_IDS = ['7698608', '12314607'];
 
 const SCROLL_LOAD_MS = 2000;
 

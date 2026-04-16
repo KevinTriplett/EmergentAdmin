@@ -177,8 +177,8 @@ export async function removeSpaceMembers({
 
   try {
     await page.goto(url, { waitUntil: 'networkidle2' });
-    await page.waitForSelector(SEL_READY, { timeout: 60_000 });
     await loginIfNeeded(page, log);
+    await page.waitForSelector(SEL_READY, { timeout: 60_000 });
     await page.waitForSelector(SEL_FLYOUT, { timeout: 60_000 });
     await page.waitForSelector(`${SEL_FLYOUT} ${SEL_TABLE_MEMBERS}`, { timeout: 60_000 });
     await log(`Loaded member list for: ${fullSpaceName}`);

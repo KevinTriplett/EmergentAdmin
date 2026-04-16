@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Page } from 'puppeteer';
 import { launchBrowser as defaultLaunchBrowser } from './utils/browser.js';
-import { removeSpaceMembers as defaultRemoveSpaceMembers } from './tasks/removeSpaceMembers.js';
+import { removeSpaceMembers as defaultRemoveSpaceMembers, SPACE_IDS } from './tasks/removeSpaceMembers.js';
 
 const publicDir = path.join(process.cwd(), 'public');
 const DEFAULT_USER_AGENT =
@@ -105,6 +105,98 @@ export function createApp(deps: CreateAppDeps): http.Server {
       });
       broadcast({ type: 'done', result });
       res.status(200).json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      broadcast({ type: 'error', message });
+      res.status(500).json({ error: message });
+    } finally {
+      if (browser) {
+        await browser.close().catch(() => undefined);
+      }
+      taskRunning = false;
+      currentAbort = null;
+      abortSignal.aborted = false;
+    }
+  });
+
+  app.post('/run/remove-all-space-members', async (req, res) => {
+    const body = req.body as Record<string, unknown>;
+
+    if (typeof body.headless !== 'undefined' && typeof body.headless !== 'boolean') {
+      res.status(400).json({ error: 'headless must be a boolean' });
+      return;
+    }
+    if (typeof body.dryRun !== 'undefined' && typeof body.dryRun !== 'boolean') {
+      res.status(400).json({ error: 'dryRun must be a boolean' });
+      return;
+    }
+
+    const headless = typeof body.headless === 'boolean' ? body.headless : true;
+    const dryRun = typeof body.dryRun === 'boolean' ? body.dryRun : true;
+
+    if (taskRunning) {
+      res.status(409).json({ error: 'A task is already running' });
+      return;
+    }
+
+    const abortSignal = { aborted: false };
+    currentAbort = abortSignal;
+    taskRunning = true;
+
+    const broadcast = (payload: object) => {
+      const raw = JSON.stringify(payload);
+      for (const ws of clients) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(raw);
+        }
+      }
+    };
+
+    const log = (message: string) => {
+      console.log(message);
+      broadcast({ type: 'log', message });
+    };
+
+    let browser: BrowserHandle | null = null;
+    const spaceNames = Object.keys(SPACE_IDS);
+    const results: Array<{ space: string; success: boolean; removed: number; error?: string }> = [];
+
+    try {
+      browser = await deps.launchBrowser(headless);
+      const page = await browser.newPage();
+      await page.setUserAgent(DEFAULT_USER_AGENT);
+      await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+
+      for (const spaceName of spaceNames) {
+        if (abortSignal.aborted) {
+          log(`Abort requested — skipping remaining spaces.`);
+          break;
+        }
+
+        log(`\n═══ Processing space: ${spaceName} ═══`);
+
+        const result = await deps.removeSpaceMembers({
+          page,
+          fullSpaceName: spaceName,
+          dryRun,
+          log,
+          abortSignal,
+          sleep: defaultSleep,
+        });
+
+        results.push({ space: spaceName, ...result });
+
+        if (result.success) {
+          log(`✓ ${spaceName}: ${result.removed} removed.`);
+        } else {
+          log(`✗ ${spaceName}: ${result.error ?? 'unknown error'}`);
+        }
+      }
+
+      const totalRemoved = results.reduce((sum, r) => sum + r.removed, 0);
+      const summary = { totalRemoved, spaces: results };
+      broadcast({ type: 'done', result: summary });
+      res.status(200).json(summary);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       broadcast({ type: 'error', message });

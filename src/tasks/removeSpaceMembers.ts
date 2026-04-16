@@ -15,7 +15,7 @@ const SEL_MODAL_CANCEL = '#modal-content-region .modal-reject-button';
 const SEL_MODAL_REGION = '#modal-content-region';
 
 // === SPACE IDS — Maps display name to MN space ID ===
-const SPACE_IDS: Record<string, string> = {
+export const SPACE_IDS: Record<string, string> = {
   '1. Relating to SELF': '7330330',
   '2. Relating to OTHERS': '7330338',
   '3. Relating to WORLD': '7330342',

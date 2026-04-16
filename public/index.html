@@ -187,7 +187,8 @@
       </div>
 
       <div class="actions">
-        <button type="button" class="primary" id="btn-run">Remove All Non-Admin Members</button>
+        <button type="button" class="primary" id="btn-run">Remove From Selected Space</button>
+        <button type="button" class="danger" id="btn-run-all">Remove From ALL Spaces</button>
       </div>
     </section>
 
@@ -202,6 +203,7 @@
         const logPanel = document.getElementById('log-panel');
         const resultEl = document.getElementById('result');
         const btnRun = document.getElementById('btn-run');
+        const btnRunAll = document.getElementById('btn-run-all');
         const btnAbort = document.getElementById('btn-abort');
         const btnClear = document.getElementById('btn-clear-log');
         const spaceSelect = document.getElementById('space-select');
@@ -218,6 +220,7 @@
         function setTaskRunning(running) {
           taskRunning = running;
           btnRun.disabled = running;
+          btnRunAll.disabled = running;
           abortWrap.hidden = !running;
           btnAbort.disabled = !running;
         }
@@ -310,18 +313,14 @@
           }
         });
 
-        btnRun.addEventListener('click', async function () {
+        async function runTask(endpoint, payload) {
           clearResult();
           setTaskRunning(true);
           try {
-            const res = await fetch('/run/remove-space-members', {
+            const res = await fetch(endpoint, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                fullSpaceName: spaceSelect.value,
-                headless: chkHeadless.checked,
-                dryRun: chkDry.checked,
-              }),
+              body: JSON.stringify(payload),
             });
             const body = await res.json().catch(function () {
               return {};
@@ -337,12 +336,27 @@
               showResult('<strong>HTTP ' + res.status + '</strong><pre>' + escapeHtml(JSON.stringify(body, null, 2)) + '</pre>', true);
               return;
             }
-            /* Final summary comes from WebSocket { type: "done" }; re-enable if WS missed. */
             setTaskRunning(false);
           } catch (e) {
             appendLog('ERROR: ' + (e && e.message ? e.message : String(e)));
             setTaskRunning(false);
           }
+        }
+
+        btnRun.addEventListener('click', function () {
+          runTask('/run/remove-space-members', {
+            fullSpaceName: spaceSelect.value,
+            headless: chkHeadless.checked,
+            dryRun: chkDry.checked,
+          });
+        });
+
+        btnRunAll.addEventListener('click', function () {
+          if (!confirm('This will process ALL spaces. Continue?')) return;
+          runTask('/run/remove-all-space-members', {
+            headless: chkHeadless.checked,
+            dryRun: chkDry.checked,
+          });
         });
 
         connectWs();

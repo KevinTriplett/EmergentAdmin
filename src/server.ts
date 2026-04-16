@@ -92,9 +92,9 @@ export function createApp(deps: CreateAppDeps): http.Server {
         platform: navigator.platform,
         language: navigator.language,
       }));
-      log(
-        `Puppeteer runtime: userAgent="${runtimeInfo.userAgent}" platform="${runtimeInfo.platform}" language="${runtimeInfo.language}" url="${page.url()}"`,
-      );
+      // log(
+      //   `Puppeteer runtime: userAgent="${runtimeInfo.userAgent}" platform="${runtimeInfo.platform}" language="${runtimeInfo.language}" url="${page.url()}"`,
+      // );
       const result = await deps.removeSpaceMembers({
         page,
         fullSpaceName: fullSpaceName.trim(),

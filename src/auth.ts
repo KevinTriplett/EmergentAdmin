@@ -141,9 +141,9 @@ async function fillPassword(page: Page, password: string): Promise<void> {
 }
 
 async function handleGdprConsentIfPresent(page: Page, log: LogFn): Promise<void> {
-  await log('Handling GDPR consent...');
   const gdpr = await page.$(SEL_GDPR_CONSENT);
   if (gdpr) {
+    await log('Handling GDPR consent...');
     try {
       await gdpr.click();
     } finally {

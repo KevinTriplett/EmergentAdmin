@@ -27,6 +27,7 @@ will be added in Stage 2.
   - 8. Miscellaneous
   - Creative Center
   - Marketplace
+  - Playground
 
 **Options:**
 - Checkbox: "Headless mode" — default CHECKED (true).

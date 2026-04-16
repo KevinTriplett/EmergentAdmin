@@ -28,6 +28,7 @@ const SPACE_IDS: Record<string, string> = {
   '8. Miscellaneous': '9325627',
   'Creative Center': '5722465',
   Marketplace: '5627234',
+  Playground: '23462808',
 };
 
 // === ADMIN IDS — Never remove these members ===

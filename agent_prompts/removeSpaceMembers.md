@@ -16,7 +16,7 @@ const SEL_READY = 'body.pace-done #community-app';
 const SEL_SIGN_IN = 'body.auth-sign_in';
 const SEL_FLYOUT = '#flyout-main-content';
 const SEL_TABLE_MEMBERS = '.all-members-list-items';
-const SEL_MEMBER_ROW = 'tr[data-member-item]';
+const SEL_MEMBER_ROW = '[data-member-item]';
 const SEL_MEMBER_DROPDOWN = '.actions-region a.mighty-drop-down-toggle';
 const SEL_MEMBER_DROPDOWN_MORE = '.actions-region .mighty-drop-down-menu-region .menu-list-item-more-host-FlexSpace-actions .toggle-child-expanded-button';
 

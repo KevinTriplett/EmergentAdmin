@@ -7,7 +7,7 @@ import { log } from 'console';
 const SEL_READY = 'body.pace-done #community-app';
 const SEL_FLYOUT = '#flyout-main-content';
 const SEL_TABLE_MEMBERS = '.all-members-list-items';
-const SEL_MEMBER_ROW = 'tr[data-member-item]';
+const SEL_MEMBER_ROW = '[data-member-item]';
 const SEL_MEMBER_DROPDOWN = '.actions-region a.mighty-drop-down-toggle';
 const SEL_MEMBER_DROPDOWN_MORE =
   '.actions-region .mighty-drop-down-menu-region .menu-list-item-more-host-FlexSpace-actions .toggle-child-expanded-button';
@@ -52,15 +52,14 @@ export type RemoveSpaceMembersResult = {
   error?: string;
 };
 
-type RowMeta = { memberId: string; name: string; profileUrl: string };
+type RowMeta = { memberId: string; name: string };
 
 async function readRowMeta(row: ElementHandle<Element>): Promise<RowMeta> {
   return row.evaluate((el) => {
     const memberId = el.getAttribute('data-member-item') ?? '';
-    const link = el.querySelector('td a[href]') as HTMLAnchorElement | null;
+    const link = el.querySelector('a[href]') as HTMLAnchorElement | null;
     const name = link?.getAttribute('title')?.trim() || link?.textContent?.trim() || '';
-    const profileUrl = link?.href || '';
-    return { memberId, name, profileUrl };
+    return { memberId, name };
   });
 }
 
@@ -145,7 +144,7 @@ async function pickFirstEligibleRow(
   for (const row of rows) {
     const meta = await readRowMeta(row);
     if (ADMIN_IDS.includes(meta.memberId)) continue;
-    if (dryRun && dryRunSeen.has(meta.profileUrl)) continue;
+    if (dryRun && dryRunSeen.has(meta.memberId)) continue;
     return { row, meta };
   }
   return null;
@@ -197,9 +196,8 @@ export async function removeSpaceMembers({
         };
       }
 
-      log('Picking first eligible row...');
       let picked = await pickFirstEligibleRow(page, dryRun, dryRunSeen);
-      log(`Picked: ${JSON.stringify(picked)}`);
+
       if (!picked) {
         await scrollFlyout(page);
         await sleep(SCROLL_LOAD_MS);
@@ -210,9 +208,9 @@ export async function removeSpaceMembers({
       }
 
       const { row, meta } = picked;
-      const { name, profileUrl } = meta;
+      const { name, memberId } = meta;
 
-      await log(`${dryRun ? 'WOULD REMOVE' : 'Removing'}: ${name} (${profileUrl})`);
+      await log(`${dryRun ? 'WOULD REMOVE' : 'Removing'}: ${name} (${memberId})`);
 
       if (abortSignal.aborted) {
         await log(`Abort requested. Stopped after ${removed} removals.`);
@@ -224,7 +222,7 @@ export async function removeSpaceMembers({
       }
 
       if (dryRun) {
-        dryRunSeen.add(profileUrl);
+        dryRunSeen.add(memberId);
         await row.dispose().catch(() => undefined);
         continue;
       }
@@ -241,20 +239,18 @@ export async function removeSpaceMembers({
 
       try {
         await page.waitForFunction(
-          ({ href, adminList }) => {
-            const rows = Array.from(document.querySelectorAll('tr[data-member-item]'));
+          ({ memberId, adminList }) => {
+            const rows = Array.from(document.querySelectorAll('[data-member-item]'));
             for (const el of rows) {
               const id = el.getAttribute('data-member-item') ?? '';
               if (adminList.includes(id)) continue;
-              const link = el.querySelector('td a[href]') as HTMLAnchorElement | null;
-              const h = link?.href ?? '';
-              if (h !== href) return true;
+              if (id !== memberId) return true;
               return false;
             }
             return true;
           },
           { timeout: 30_000 },
-          { href: profileUrl, adminList: ADMIN_IDS },
+          { memberId: memberId, adminList: ADMIN_IDS },
         );
       } catch {
         const message = 'Timeout waiting for member row to update after removal';
@@ -285,8 +281,8 @@ export async function removeSpaceMembers({
         continue;
       }
 
-      if (nextFirst[0].profileUrl === profileUrl) {
-        const msg = `STALE GUARD: ${name} (${profileUrl}) is still at index 0 after confirmed removal. MN may have rejected the removal or re-rendered unexpectedly. Halting.`;
+      if (nextFirst[0].memberId === memberId) {
+        const msg = `STALE GUARD: ${name} (${memberId}) is still at index 0 after confirmed removal. MN may have rejected the removal or re-rendered unexpectedly. Halting.`;
         await log(msg);
         return { success: false, removed, error: msg };
       }

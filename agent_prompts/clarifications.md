@@ -28,7 +28,8 @@ selSignedIn = 'body.communities-app'
 ### spaceMembers page
 
 selFlyoutId = '#flyout-main-content'
-selTableMembers = '.all-members-list-items'
+selMemberList = '.all-members-list-items'
+selMemberListRows = '
 selMemberDropdown = '.actions-region a.mighty-drop-down-toggle'
 selMemberDowndownMore = '.actions-region .mighty-drop-down-menu-region .menu-list-item-more-host-FlexSpace-actions .toggle-child-expanded-button'
 txtRemoveMember = 'Remove from Space'
@@ -93,7 +94,7 @@ Notes:
 1. visit urlSpaceMembers
 1. wait until selReady
 1. login if selSignIn visible
-1. for each tr[data-member-item] !== adminId
+1. for each [data-member-item] !== adminId
     1. click selMemberDropdown
     1. click selMemberDropdownMore
     1. click the element with txtRemoveMember

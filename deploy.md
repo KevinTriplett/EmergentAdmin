@@ -7,14 +7,36 @@ This guide assumes:
 
 ---
 
-## 1. Install Node.js 20
+## 1. Install Node.js via nvm
+
+Node is managed per-user with [nvm](https://github.com/nvm-sh/nvm) so the version in the repo's `.nvmrc` is always authoritative.
+
+First, install build prerequisites (nvm needs these to fetch the Node tarball):
 
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
-sudo apt-get install -y nodejs
-node -v   # should print v20.x
+sudo apt-get update
+sudo apt-get install -y curl ca-certificates build-essential
+```
+
+The remaining commands in this section should run as the **deploy user** (see section 3 — create it first if you haven't). As that user:
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+
+# Load nvm into the current shell (new shells get it from ~/.bashrc automatically)
+export NVM_DIR="$HOME/.nvm"
+. "$NVM_DIR/nvm.sh"
+
+# Install whatever version the repo pins
+cd ~/EmergentAdmin 2>/dev/null || true   # only works after section 4; otherwise skip
+nvm install          # reads .nvmrc
+nvm alias default "$(cat .nvmrc 2>/dev/null || echo lts/*)"
+
+node -v              # should match .nvmrc
 npm -v
 ```
+
+> **Note:** If you haven't cloned the repo yet, just run `nvm install --lts` for now and re-run `nvm install` from inside the repo after section 4.
 
 ## 2. Install Chromium dependencies
 
@@ -43,6 +65,13 @@ All remaining commands in sections 4–6 run as this user (or your deploy user).
 cd ~
 git clone git@github.com:KevinTriplett/EmergentAdmin.git
 cd EmergentAdmin
+
+# Make sure nvm is loaded and the pinned Node version is active
+export NVM_DIR="$HOME/.nvm"
+. "$NVM_DIR/nvm.sh"
+nvm install            # reads .nvmrc and installs if missing
+nvm use                # activates the .nvmrc version for this shell
+
 npm ci
 npm run install:browsers
 npm run build
@@ -73,6 +102,8 @@ npm start
 
 ## 6. Create systemd service
 
+systemd does **not** source the user's shell, so `nvm` (a shell function) is not on `PATH` by default. We start Node through a short `bash -lc` wrapper that sources nvm and reads `.nvmrc`. This way the service always tracks whatever version the repo pins — no unit-file edits needed when you bump Node.
+
 ```bash
 sudo tee /etc/systemd/system/emergent-admin.service > /dev/null <<'EOF'
 [Unit]
@@ -83,17 +114,24 @@ After=network.target
 Type=simple
 User=deploy
 WorkingDirectory=/home/deploy/EmergentAdmin
-ExecStart=/usr/bin/node dist/server.js
+Environment=NODE_ENV=production
+Environment=NVM_DIR=/home/deploy/.nvm
+ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use --silent && exec node dist/server.js'
 Restart=on-failure
 RestartSec=5
-Environment=NODE_ENV=production
 
 [Install]
 WantedBy=multi-user.target
 EOF
 ```
 
-> **Note:** Adjust `User` and `WorkingDirectory` if you're not using the `deploy` user.
+> **Note:** Adjust `User`, `WorkingDirectory`, and the `NVM_DIR` path if you're not using the `deploy` user. The `exec` in `ExecStart` is important — it replaces the bash wrapper with the node process so systemd can track the real PID and forward signals correctly.
+>
+> **Alternative (pinned path):** If you'd rather not involve bash at all, run `which node` after `nvm use` and hard-code it:
+> ```ini
+> ExecStart=/home/deploy/.nvm/versions/node/v20.18.1/bin/node dist/server.js
+> ```
+> This is marginally faster to start but you'll need to update the unit file every time `.nvmrc` changes.
 
 Enable and start:
 
@@ -198,12 +236,20 @@ Create a one-liner deploy script.
 ```bash
 #!/bin/bash
 set -e
+
+export NVM_DIR="$HOME/.nvm"
+. "$NVM_DIR/nvm.sh"
+
 cd ~/EmergentAdmin
 git pull origin main
+
+nvm install           # no-op if .nvmrc version already installed
+nvm use
+
 npm ci --production
 npm run build
 sudo systemctl restart emergent-admin
-echo "Deployed $(git log -1 --format='%h %s')"
+echo "Deployed $(git log -1 --format='%h %s') on node $(node -v)"
 ```
 
 ```bash
@@ -240,6 +286,36 @@ The `PUPPETEER_USER_DATA_DIR` path is relative to `WorkingDirectory`. Make sure 
 ```bash
 mkdir -p /home/deploy/EmergentAdmin/.puppeteer-profile
 chown deploy:deploy /home/deploy/EmergentAdmin/.puppeteer-profile
+```
+
+### Service starts with the wrong Node version
+
+Symptom: `systemctl status emergent-admin` shows the service running, but it's using the system-wide Node (e.g. v24) instead of the version in `.nvmrc`, causing crashes or native-module errors.
+
+Cause: systemd does not source your shell, so `nvm` isn't on `PATH` unless the unit explicitly loads it. If `ExecStart` points at `/usr/bin/node` or a bare `node`, you get whatever happens to be globally installed.
+
+Fix: use the `bash -lc` wrapper from section 6, or hard-code the absolute path to the nvm-managed binary:
+
+```bash
+# As the deploy user:
+cd ~/EmergentAdmin
+nvm use
+which node            # copy this path into ExecStart=
+```
+
+After editing the unit:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart emergent-admin
+sudo journalctl -u emergent-admin -n 50 --no-pager
+```
+
+Confirm the right version is running:
+
+```bash
+sudo systemctl status emergent-admin   # note the PID
+sudo readlink -f /proc/<PID>/exe        # should point into ~/.nvm/versions/node/...
 ```
 
 ### WebSocket disconnects immediately

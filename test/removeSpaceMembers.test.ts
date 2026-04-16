@@ -7,9 +7,19 @@ vi.mock('../src/auth.js', () => ({
   loginIfNeeded: vi.fn().mockResolvedValue(undefined),
 }));
 
+function mockClickableHandle(): ElementHandle<Element> {
+  return {
+    click: vi.fn().mockResolvedValue(undefined),
+    evaluate: vi.fn().mockResolvedValue(undefined),
+    dispose: vi.fn().mockResolvedValue(undefined),
+  } as unknown as ElementHandle<Element>;
+}
+
 function mockRow(memberId: string, name: string, href: string): ElementHandle<Element> {
+  const actionHandle = mockClickableHandle();
   return {
     dispose: vi.fn().mockResolvedValue(undefined),
+    $: vi.fn().mockResolvedValue(actionHandle),
     evaluate: vi.fn(async (fn: (el: Element) => unknown) => {
       const el = {
         getAttribute: (k: string) => (k === 'data-member-item' ? memberId : null),
@@ -73,6 +83,7 @@ describe('removeSpaceMembers', () => {
   it('dry run visits URL, logs, and completes with removed 0 when one member then exhausted', async () => {
     const goto = vi.fn().mockResolvedValue(undefined);
     const waitForSelector = vi.fn().mockResolvedValue(undefined);
+    const waitForFunction = vi.fn().mockResolvedValue(undefined);
     const memberRow = mockRow('111', 'Member One', 'https://emergent-commons.mn.co/u/1');
     const $$ = vi
       .fn()
@@ -80,11 +91,13 @@ describe('removeSpaceMembers', () => {
       .mockResolvedValueOnce([memberRow])
       .mockResolvedValueOnce([])
       .mockResolvedValue([]);
-    const $ = vi.fn().mockResolvedValue({
-      evaluate: vi.fn().mockResolvedValue(undefined),
+    const $ = vi.fn(async (selector: string) => {
+      if (selector.includes('[data-member-item="111"]')) return memberRow;
+      return mockClickableHandle();
     });
+    const evaluate = vi.fn().mockResolvedValue(true);
 
-    const page = { goto, waitForSelector, $$, $ } as unknown as Page;
+    const page = { goto, waitForSelector, waitForFunction, $$, $, evaluate } as unknown as Page;
 
     const sleep = vi.fn().mockResolvedValue(undefined);
 

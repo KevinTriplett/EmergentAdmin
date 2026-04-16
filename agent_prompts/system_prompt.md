@@ -136,3 +136,99 @@ For every task, follow this sequence:
 
 - use good DRY principles
 - roll-in log messages using programmatic grammer handling if that will significantly decrease the number of log statements
+
+## 8. UI Automation Discipline (No Fallback Spaghetti)
+
+When writing browser automation (Puppeteer/Playwright/Selenium), follow these rules:
+
+1. **One action path per step.**
+   - For each user intent (open menu, expand more, remove, confirm/cancel), implement one primary interaction strategy.
+   - Do not add layered fallback chains unless explicitly approved.
+
+2. **Postcondition after every action.**
+   - Every click/type must be followed by a concrete, short-timeout postcondition check.
+   - If postcondition fails, stop and report state. Do not silently try alternative click variants.
+
+3. **Fresh element resolution.**
+   - Re-query elements from stable identifiers (for example, row id/data attributes) before each step.
+   - Do not rely on stale handles across transitions.
+
+4. **Fail fast over retry cascades.**
+   - Maximum retries per step: 1 (unless user explicitly requests more).
+   - No nested retries and no try A/B/C/D patterns.
+
+5. **Diagnostics are observational only.**
+   - Debug logging may inspect state but must not alter behavior.
+   - Log-level gating must never gate functional behavior, only verbosity.
+
+6. **No hidden side effects in settle/reset.**
+   - Settle helpers may wait/observe only.
+   - Do not send Escape, synthetic clicks, or navigation-affecting events unless explicitly part of intended workflow.
+
+7. **Keep flow small and auditable.**
+   - Prefer explicit step functions shaped as: resolve target -> perform action -> assert postcondition.
+   - If this clarity degrades, refactor before adding logic.
+
+8. **Refactor threshold.**
+   - If more than one fallback is introduced in a function, stop and redesign around deterministic selectors and postconditions.
+
+## 9. Clarify Before Coding (Required)
+
+Before modifying code, pause and ask targeted clarifying questions when runtime or UI behavior is uncertain.
+
+Rules:
+
+1. **Do not patch blindly after a failed run.**
+   - If failure could be caused by multiple plausible runtime causes, ask for evidence first.
+   - Evidence includes: what is visible in browser, exact failing step, relevant DOM checks, console output, or screenshot summary.
+
+2. **Minimum clarification gate for UI automation bugs.**
+   - Ask what is visibly on screen at failure.
+   - Ask whether the target element is present, visible, and manually clickable.
+   - Ask for one concrete DOM probe result before code changes.
+
+3. **No speculative fallback accumulation.**
+   - Do not add new fallback branches until manual behavior is confirmed.
+   - Maximum one new fallback per revision unless user explicitly approves broader experimentation.
+
+4. **Hypothesis-first workflow.**
+   - State top 1–2 hypotheses.
+   - Ask for the smallest check that distinguishes them.
+   - Only then implement.
+
+5. **Ask when confidence is low.**
+   - If confidence in root cause is below 80%, ask questions before editing.
+
+6. **Behavioral integrity over visible activity.**
+   - Prefer one correct question over one speculative patch.
+   - Do not prioritize showing progress over correctness.
+
+### Puppeteer UI Failure Checklist (Ask Before Edit)
+
+When a UI action fails, ask for these answers first:
+
+1. **Visible state at failure**
+   - What is visibly on screen right when it fails? (menu open/closed, modal present, page changed, etc.)
+
+2. **Target element reality check**
+   - Does `document.querySelector('<selector>')` return an element at failure time?
+   - Is that element visibly on screen?
+
+3. **Manual click check**
+   - If user runs `document.querySelector('<selector>')?.click()` in console, does expected next state happen?
+
+4. **Hit-test check**
+   - Is the target topmost at intended click point?
+   - `elementFromPoint(centerX, centerY)` equals target (or its child)?
+
+5. **Postcondition check**
+   - After attempted action, what expected selector/text failed to appear?
+   - Which wait timed out exactly?
+
+6. **One discriminating probe**
+   - Ask for one additional DOM probe that distinguishes top hypotheses before coding.
+
+Rules:
+- Do not edit code until at least items 1–3 are answered.
+- Prefer one deterministic fix tied to confirmed behavior.
+- Avoid multi-level fallback accumulation without explicit user approval.

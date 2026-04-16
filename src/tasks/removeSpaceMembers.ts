@@ -12,6 +12,7 @@ const SEL_MEMBER_DROPDOWN_MORE = '#menu-list-item-more-host-FlexSpace-actions .t
 const SEL_REMOVE_FROM_SPACE = '#menu-list-item-remove-from-sub-space';
 const SEL_MODAL_CONFIRM = '#modal-content-region .modal-confirm-button';
 const SEL_MODAL_CANCEL = '#modal-content-region .modal-reject-button';
+const SEL_MODAL_REGION = '#modal-content-region';
 
 // === SPACE IDS — Maps display name to MN space ID ===
 const SPACE_IDS: Record<string, string> = {
@@ -29,26 +30,19 @@ const SPACE_IDS: Record<string, string> = {
 };
 
 // === ADMIN IDS — Never remove these members ===
-const ADMIN_IDS = [
-  '7698608',
-  '12314607',
-];
+const ADMIN_IDS = ['7698608', '12314607'];
 
 const SCROLL_LOAD_MS = 2000;
 const WAIT_SHORT_MS = 15_000;
 const WAIT_ROW_UPDATE_MS = 30_000;
 const OPTIONAL_ACK_TIMEOUT_MS = 1200;
+const DRY_RUN_SETTLE_WAIT_MS = 1200;
+const DRY_RUN_SETTLE_FALLBACK_SLEEP_MS = 500;
 
 export type LogLevel = 'light' | 'debug';
 const DEFAULT_LOG_LEVEL: LogLevel =
   process.env.REMOVE_MEMBERS_LOG_LEVEL === 'debug' ? 'debug' : 'light';
 
-/** Normalize visible UI text for comparisons (whitespace, MN quirks). */
-function normalizeUiText(s: string): string {
-  return s.replace(/\s+/g, ' ').trim();
-}
-
-/** Shared phrasing: member display name + id — keeps log grammar consistent. */
 function memberRef(name: string, memberId: string): string {
   return `${name} (member ${memberId})`;
 }
@@ -57,7 +51,6 @@ function pluralSuffix(n: number, singular: string, plural: string): string {
   return n === 1 ? singular : plural;
 }
 
-/** User-facing log lines — single source of truth for wording and grammar. */
 const msg = {
   unknownSpace: (name: string) => `Unknown space: "${name}".`,
   memberListLoaded: (space: string) => `Member list loaded for "${space}".`,
@@ -74,26 +67,7 @@ const msg = {
     `STALE GUARD: ${memberRef(name, memberId)} is still first in the list after removal. Halting.`,
   timeoutRowUpdate: () => 'Timed out waiting for the member list to update after removal.',
   clicking: (label: string) => `Clicking ${label}…`,
-  clickFallback: (label: string, detail: string) =>
-    `${label}: standard click failed; using DOM click instead. ${detail}`,
 } as const;
-
-const clickTarget = {
-  memberMenu: 'member action menu',
-  moreActions: 'more actions control',
-  removeFromSpace: 'Remove from space',
-  confirmRemoval: 'confirm removal',
-  cancel: 'cancel',
-} as const;
-
-/** Puppeteer step key → stable “not found” copy (capitalized product wording). */
-const STEP_NOT_FOUND: Record<keyof typeof clickTarget, string> = {
-  memberMenu: 'Member action dropdown not found',
-  moreActions: 'More actions control not found',
-  removeFromSpace: 'Remove from space control not found',
-  confirmRemoval: 'Confirm removal control not found',
-  cancel: 'Cancel control not found',
-};
 
 export type RemoveSpaceMembersArgs = {
   page: Page;
@@ -113,6 +87,10 @@ export type RemoveSpaceMembersResult = {
 
 type RowMeta = { memberId: string; name: string };
 
+// ---------------------------------------------------------------------------
+// Primitives
+// ---------------------------------------------------------------------------
+
 async function readRowMeta(row: ElementHandle<Element>): Promise<RowMeta> {
   return row.evaluate((el) => {
     const memberId = el.getAttribute('data-member-item') ?? '';
@@ -122,11 +100,7 @@ async function readRowMeta(row: ElementHandle<Element>): Promise<RowMeta> {
   });
 }
 
-async function waitForSelectorInDom(
-  page: Page,
-  selector: string,
-  timeoutMs: number,
-): Promise<void> {
+async function waitForSelector(page: Page, selector: string, timeoutMs: number): Promise<void> {
   await page.waitForFunction(
     (sel) => document.querySelector(sel) !== null,
     { timeout: timeoutMs },
@@ -134,125 +108,40 @@ async function waitForSelectorInDom(
   );
 }
 
-type SelectorDiagnostics = {
-  selector: string;
-  count: number;
-  firstVisible: boolean;
-  firstRect: { x: number; y: number; width: number; height: number } | null;
-  firstPointerEvents: string | null;
-  firstDisplay: string | null;
-  firstVisibility: string | null;
-  centerHitMatchesFirst: boolean | null;
-};
-
-async function gatherSelectorDiagnostics(
-  page: Page,
-  selector: string,
-): Promise<SelectorDiagnostics> {
-  return page.evaluate((sel) => {
-    const nodes = Array.from(document.querySelectorAll(sel));
-    const first = (nodes[0] as HTMLElement | undefined) ?? null;
-    if (!first) {
-      return {
-        selector: sel,
-        count: 0,
-        firstVisible: false,
-        firstRect: null,
-        firstPointerEvents: null,
-        firstDisplay: null,
-        firstVisibility: null,
-        centerHitMatchesFirst: null,
-      };
-    }
-
-    const rect = first.getBoundingClientRect();
-    const style = window.getComputedStyle(first);
-    const firstVisible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden';
-    const centerX = rect.left + rect.width / 2;
-    const centerY = rect.top + rect.height / 2;
-    const hit = document.elementFromPoint(centerX, centerY);
-    const centerHitMatchesFirst = hit === first || (hit ? first.contains(hit) : false);
-
-    return {
-      selector: sel,
-      count: nodes.length,
-      firstVisible,
-      firstRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-      firstPointerEvents: style.pointerEvents,
-      firstDisplay: style.display,
-      firstVisibility: style.visibility,
-      centerHitMatchesFirst,
-    };
-  }, selector);
-}
-
-async function armClickDiagnostics(handle: ElementHandle<Element>): Promise<void> {
-  await handle.evaluate((el) => {
-    const n = el as HTMLElement & { __diagClicks?: number; __diagMouseDown?: number };
-    n.__diagClicks = 0;
-    n.__diagMouseDown = 0;
-    n.addEventListener(
-      'mousedown',
-      () => {
-        n.__diagMouseDown = (n.__diagMouseDown || 0) + 1;
-      },
-      { capture: true },
-    );
-    n.addEventListener(
-      'click',
-      () => {
-        n.__diagClicks = (n.__diagClicks || 0) + 1;
-      },
-      { capture: true },
-    );
-  });
-}
-
-async function readClickDiagnostics(
-  handle: ElementHandle<Element>,
-): Promise<{ clickCount: number; mouseDownCount: number }> {
-  return handle.evaluate((el) => {
-    const n = el as HTMLElement & { __diagClicks?: number; __diagMouseDown?: number };
-    return { clickCount: n.__diagClicks || 0, mouseDownCount: n.__diagMouseDown || 0 };
-  });
-}
-
-async function logSelectorDiagnostics(page: Page, selector: string, log: LogFn, stage: string): Promise<void> {
-  const d = await gatherSelectorDiagnostics(page, selector);
-  await log(
-    `DIAG ${stage}: selector="${d.selector}" count=${d.count} visible=${d.firstVisible} rect=${JSON.stringify(
-      d.firstRect,
-    )} pointerEvents=${d.firstPointerEvents} display=${d.firstDisplay} visibility=${d.firstVisibility} centerHitMatchesFirst=${d.centerHitMatchesFirst}`,
+async function waitForSelectorAbsent(page: Page, selector: string, timeoutMs: number): Promise<void> {
+  await page.waitForFunction(
+    (sel) => document.querySelector(sel) === null,
+    { timeout: timeoutMs },
+    selector,
   );
 }
 
-async function isSelectorVisible(page: Page, selector: string): Promise<boolean> {
-  return page.evaluate((sel) => {
+/** DOM click on a selector. MN menu/modal controls do not respond to Puppeteer pointer clicks. */
+async function domClick(page: Page, selector: string, label: string): Promise<void> {
+  const found = await page.evaluate((sel) => {
     const el = document.querySelector(sel) as HTMLElement | null;
     if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
+    el.click();
+    return true;
   }, selector);
+  if (!found) throw new Error(`${label}: selector not found (${selector})`);
 }
 
-async function clickHandleSafely(
-  handle: ElementHandle<Element>,
-  stepLabel: string,
-  log: LogFn,
-): Promise<void> {
-  await log(msg.clicking(stepLabel));
-
-  await handle.evaluate((el) => {
-    (el as HTMLElement).scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-  });
-
-  try {
-    await handle.click({ delay: 25 });
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    await log(msg.clickFallback(stepLabel, detail));
-    throw err;
-  }
+/** DOM click scoped to a member row. */
+async function domClickInRow(page: Page, memberId: string, selector: string, label: string): Promise<void> {
+  const rowSelector = `${SEL_MEMBER_ROW}[data-member-item="${memberId}"]`;
+  const found = await page.evaluate(
+    ({ rowSel, childSel }) => {
+      const row = document.querySelector(rowSel) as HTMLElement | null;
+      if (!row) return false;
+      const el = row.querySelector(childSel) as HTMLElement | null;
+      if (!el) return false;
+      el.click();
+      return true;
+    },
+    { rowSel: rowSelector, childSel: selector },
+  );
+  if (!found) throw new Error(`${label}: row or control not found (row=${rowSelector}, control=${selector})`);
 }
 
 async function disposeHandle(handle: ElementHandle<Element> | null): Promise<void> {
@@ -262,205 +151,171 @@ async function disposeHandle(handle: ElementHandle<Element> | null): Promise<voi
   }
 }
 
-async function clickRowScopedControl(
-  row: ElementHandle<Element>,
-  selector: string,
-  stepKey: keyof typeof clickTarget,
-  log: LogFn,
-): Promise<void> {
-  const handle = await row.$(selector);
-  if (!handle) throw new Error(STEP_NOT_FOUND[stepKey]);
-  try {
-    await clickHandleSafely(handle, clickTarget[stepKey], log);
-  } finally {
-    await disposeHandle(handle);
-  }
+// ---------------------------------------------------------------------------
+// Debug diagnostics (observational only — never alter behavior)
+// ---------------------------------------------------------------------------
+
+type SelectorSnapshot = {
+  count: number;
+  visible: boolean;
+  rect: { x: number; y: number; width: number; height: number } | null;
+};
+
+async function snapshotSelector(page: Page, selector: string): Promise<SelectorSnapshot> {
+  return page.evaluate((sel) => {
+    const nodes = Array.from(document.querySelectorAll(sel));
+    const first = nodes[0] as HTMLElement | undefined;
+    if (!first) return { count: 0, visible: false, rect: null };
+    const rect = first.getBoundingClientRect();
+    const visible = rect.width > 0 && rect.height > 0;
+    return {
+      count: nodes.length,
+      visible,
+      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+    };
+  }, selector);
 }
 
-async function waitDomThenClickPageControl(
-  page: Page,
-  selector: string,
-  stepKey: keyof typeof clickTarget,
-  log: LogFn,
-  timeoutMs: number,
-  logLevel: LogLevel,
-): Promise<void> {
-  if (stepKey === 'moreActions' && logLevel === 'debug') {
-    await logSelectorDiagnostics(page, selector, log, 'before-wait');
-  }
-  await waitForSelectorInDom(page, selector, timeoutMs);
-  if (stepKey === 'moreActions' && logLevel === 'debug') {
-    await logSelectorDiagnostics(page, selector, log, 'after-wait');
-  }
-  const handle = await page.$(selector);
-  if (!handle) throw new Error(STEP_NOT_FOUND[stepKey]);
-  try {
-    if (stepKey === 'moreActions' && logLevel === 'debug') {
-      await armClickDiagnostics(handle);
-    }
-    try {
-      await clickHandleSafely(handle, clickTarget[stepKey], log);
-    } catch {
-      await page.evaluate((sel) => {
-        const el = document.querySelector(sel);
-        if (!el) throw new Error(`Selector not found for DOM click fallback: ${sel}`);
-        (el as HTMLElement).click();
-      }, selector);
-      if (logLevel === 'debug') {
-        await log(`DIAG ${String(stepKey)}: used selector-based DOM click fallback`);
-      }
-    }
-    if (stepKey === 'moreActions' && logLevel === 'debug') {
-      const clickDiag = await readClickDiagnostics(handle);
-      await log(
-        `DIAG moreActions: target events mousedown=${clickDiag.mouseDownCount} click=${clickDiag.clickCount}`,
-      );
-      await logSelectorDiagnostics(page, selector, log, 'after-click');
-      let removeVisible = await isSelectorVisible(page, SEL_REMOVE_FROM_SPACE);
-      await log(`DIAG moreActions: remove-control-visible-after-click=${removeVisible}`);
-      if (!removeVisible) {
-        await log('DIAG moreActions: forcing DOM click fallback because submenu did not expand');
-        await handle.evaluate((el) => {
-          (el as HTMLElement).click();
-        });
-        removeVisible = await isSelectorVisible(page, SEL_REMOVE_FROM_SPACE);
-        await log(`DIAG moreActions: remove-control-visible-after-dom-click=${removeVisible}`);
-        if (!removeVisible) {
-          await logSelectorDiagnostics(page, selector, log, 'after-dom-click');
-        }
-      }
-    }
-  } finally {
-    await disposeHandle(handle);
-  }
+async function logSnapshot(page: Page, selector: string, log: LogFn, stage: string): Promise<void> {
+  const s = await snapshotSelector(page, selector);
+  await log(`DIAG ${stage}: selector="${selector}" count=${s.count} visible=${s.visible} rect=${JSON.stringify(s.rect)}`);
 }
 
-async function clickPageControlIfAppears(
-  page: Page,
-  selector: string,
-  stepKey: keyof typeof clickTarget,
-  log: LogFn,
-  timeoutMs: number,
-  logLevel: LogLevel,
-): Promise<boolean> {
+// ---------------------------------------------------------------------------
+// Removal step functions — each: wait → click → assert postcondition
+// ---------------------------------------------------------------------------
+
+async function openMemberMenu(
+  page: Page, memberId: string, log: LogFn, logLevel: LogLevel,
+): Promise<void> {
+  const rowSelector = `${SEL_MEMBER_ROW}[data-member-item="${memberId}"]`;
+  await waitForSelector(page, rowSelector, WAIT_SHORT_MS);
+  await log(msg.clicking('member action menu'));
+  await domClickInRow(page, memberId, SEL_MEMBER_DROPDOWN, 'Member action menu');
+
   try {
-    await waitDomThenClickPageControl(page, selector, stepKey, log, timeoutMs, logLevel);
-    return true;
-  } catch (err) {
+    await waitForSelector(page, SEL_MEMBER_DROPDOWN_MORE, WAIT_SHORT_MS);
+  } catch {
     if (logLevel === 'debug') {
-      const message = err instanceof Error ? err.message : String(err);
-      await log(`DIAG optional ${String(stepKey)} click skipped: ${message}`);
+      await logSnapshot(page, SEL_MEMBER_DROPDOWN_MORE, log, 'openMemberMenu-postcondition-failed');
     }
-    return false;
+    throw new Error('Member action menu opened but More actions control did not appear');
   }
 }
 
-async function ensureMemberMenuOpened(
-  page: Page,
-  row: ElementHandle<Element>,
-  log: LogFn,
-  logLevel: LogLevel,
+async function expandMoreActions(
+  page: Page, log: LogFn, logLevel: LogLevel,
 ): Promise<void> {
-  const tryOpen = async (): Promise<boolean> => {
-    const handle = await row.$(SEL_MEMBER_DROPDOWN);
-    if (!handle) throw new Error(STEP_NOT_FOUND.memberMenu);
-    try {
-      try {
-        await clickHandleSafely(handle, clickTarget.memberMenu, log);
-      } catch {
-        await handle.evaluate((el) => {
-          (el as HTMLElement).click();
-        });
-        if (logLevel === 'debug') {
-          await log('DIAG memberMenu: used row-scoped DOM click fallback');
-        }
-      }
-    } finally {
-      await disposeHandle(handle);
-    }
-    return isSelectorVisible(page, SEL_MEMBER_DROPDOWN_MORE);
-  };
-
-  if (await tryOpen()) return;
   if (logLevel === 'debug') {
-    await log('DIAG memberMenu: more control missing after first click; retrying member menu click');
+    await logSnapshot(page, SEL_MEMBER_DROPDOWN_MORE, log, 'before-more-click');
   }
-  if (await tryOpen()) return;
-  throw new Error('Member action menu opened but More actions control did not appear');
+  await log(msg.clicking('more actions control'));
+  await domClick(page, SEL_MEMBER_DROPDOWN_MORE, 'More actions');
+
+  try {
+    await waitForSelector(page, SEL_REMOVE_FROM_SPACE, WAIT_SHORT_MS);
+  } catch {
+    if (logLevel === 'debug') {
+      await logSnapshot(page, SEL_REMOVE_FROM_SPACE, log, 'expandMore-postcondition-failed');
+    }
+    throw new Error('More actions expanded but Remove from space did not appear');
+  }
 }
+
+async function clickRemoveFromSpace(
+  page: Page, log: LogFn, logLevel: LogLevel,
+): Promise<void> {
+  await log(msg.clicking('Remove from space'));
+  await domClick(page, SEL_REMOVE_FROM_SPACE, 'Remove from space');
+
+  try {
+    await waitForSelector(page, SEL_MODAL_REGION, WAIT_SHORT_MS);
+  } catch {
+    if (logLevel === 'debug') {
+      await logSnapshot(page, SEL_MODAL_REGION, log, 'removeFromSpace-postcondition-failed');
+    }
+    throw new Error('Remove from space clicked but confirmation modal did not appear');
+  }
+}
+
+async function dismissDryRunModal(page: Page, log: LogFn): Promise<void> {
+  await log(msg.clicking('cancel'));
+  const clicked = await page.evaluate(
+    ({ cancelSel, regionSel }) => {
+      const modal = document.querySelector(regionSel);
+      if (!modal) return false;
+      const cancel = modal.querySelector(cancelSel.split(' ').pop()!) as HTMLElement | null;
+      if (cancel) { cancel.click(); return true; }
+      const fallback = modal.querySelector('button, [role="button"], a') as HTMLElement | null;
+      if (fallback) { fallback.click(); return true; }
+      return false;
+    },
+    { cancelSel: SEL_MODAL_CANCEL, regionSel: SEL_MODAL_REGION },
+  );
+  if (!clicked) throw new Error('Dry-run modal dismiss control not found');
+}
+
+async function confirmRemoval(
+  page: Page, log: LogFn, logLevel: LogLevel,
+): Promise<void> {
+  await log(msg.clicking('confirm removal'));
+  await domClick(page, SEL_MODAL_CONFIRM, 'Confirm removal');
+
+  // Optional second acknowledgment modal (MN sometimes shows "Okay" after confirm).
+  try {
+    await waitForSelector(page, SEL_MODAL_CONFIRM, OPTIONAL_ACK_TIMEOUT_MS);
+    await domClick(page, SEL_MODAL_CONFIRM, 'Confirm acknowledgment');
+  } catch {
+    if (logLevel === 'debug') {
+      await log('DIAG confirmRemoval: no second acknowledgment modal appeared');
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration
+// ---------------------------------------------------------------------------
 
 async function performRemoval(
-  page: Page,
-  row: ElementHandle<Element>,
-  log: LogFn,
-  dryRun: boolean,
-  logLevel: LogLevel,
+  page: Page, log: LogFn, memberId: string, dryRun: boolean, logLevel: LogLevel,
 ): Promise<void> {
-  await ensureMemberMenuOpened(page, row, log, logLevel);
-
-  await waitDomThenClickPageControl(
-    page,
-    SEL_MEMBER_DROPDOWN_MORE,
-    'moreActions',
-    log,
-    WAIT_SHORT_MS,
-    logLevel,
-  );
-
-  await waitDomThenClickPageControl(
-    page,
-    SEL_REMOVE_FROM_SPACE,
-    'removeFromSpace',
-    log,
-    WAIT_SHORT_MS,
-    logLevel,
-  );
+  await openMemberMenu(page, memberId, log, logLevel);
+  await expandMoreActions(page, log, logLevel);
+  await clickRemoveFromSpace(page, log, logLevel);
 
   if (dryRun) {
-    await waitDomThenClickPageControl(
-      page,
-      SEL_MODAL_CANCEL,
-      'cancel',
-      log,
-      WAIT_SHORT_MS,
-      logLevel,
-    );
+    await dismissDryRunModal(page, log);
+    return;
   }
 
-  await waitDomThenClickPageControl(
-    page,
-    SEL_MODAL_CONFIRM,
-    'confirmRemoval',
-    log,
-    WAIT_SHORT_MS,
-    logLevel,
-  );
-  await clickPageControlIfAppears(
-    page,
-    SEL_MODAL_CONFIRM,
-    'confirmRemoval',
-    log,
-    OPTIONAL_ACK_TIMEOUT_MS,
-    logLevel,
-  );
+  await confirmRemoval(page, log, logLevel);
+}
+
+async function settleAfterDryRunInteraction(
+  page: Page, log: LogFn, logLevel: LogLevel, sleep: (ms: number) => Promise<void>,
+): Promise<void> {
+  try {
+    await waitForSelectorAbsent(page, SEL_MODAL_REGION, DRY_RUN_SETTLE_WAIT_MS);
+  } catch {
+    await sleep(DRY_RUN_SETTLE_FALLBACK_SLEEP_MS);
+    if (logLevel === 'debug') {
+      await log(`DIAG dryRun: settle timed out; slept ${DRY_RUN_SETTLE_FALLBACK_SLEEP_MS}ms`);
+    }
+  }
 }
 
 async function scrollFlyout(page: Page): Promise<void> {
   const flyout = await page.$(SEL_FLYOUT);
   if (!flyout) return;
   try {
-    await flyout.evaluate((el) => {
-      el.scrollTop = el.scrollHeight;
-    });
+    await flyout.evaluate((el) => { el.scrollTop = el.scrollHeight; });
   } finally {
     await disposeHandle(flyout);
   }
 }
 
 async function pickFirstEligibleRow(
-  page: Page,
-  dryRun: boolean,
-  dryRunSeen: Set<string>,
+  page: Page, dryRun: boolean, dryRunSeen: Set<string>,
 ): Promise<{ row: ElementHandle<Element>; meta: RowMeta } | null> {
   const rows = await page.$$(SEL_MEMBER_ROW);
   for (const row of rows) {
@@ -473,49 +328,35 @@ async function pickFirstEligibleRow(
 }
 
 async function logAbortAndReturn(
-  log: LogFn,
-  removed: number,
+  log: LogFn, removed: number,
 ): Promise<RemoveSpaceMembersResult> {
   await log(msg.abortAfterRemovals(removed));
-  return {
-    success: true,
-    removed,
-    error: abortedRemovalMessage(removed),
-  };
+  return { success: true, removed, error: abortedRemovalMessage(removed) };
 }
 
 async function logErrorAndFail(
-  log: LogFn,
-  removed: number,
-  error: string,
+  log: LogFn, removed: number, error: string,
 ): Promise<RemoveSpaceMembersResult> {
   await log(error);
   return { success: false, removed, error };
 }
 
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
 export async function removeSpaceMembers({
-  page,
-  fullSpaceName,
-  dryRun = true,
-  log,
-  abortSignal,
-  sleep: sleepArg,
-  logLevel = DEFAULT_LOG_LEVEL,
+  page, fullSpaceName, dryRun = true, log, abortSignal,
+  sleep: sleepArg, logLevel = DEFAULT_LOG_LEVEL,
 }: RemoveSpaceMembersArgs): Promise<RemoveSpaceMembersResult> {
-  const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-  const sleep = sleepArg ?? defaultSleep;
+  const sleep = sleepArg ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
   const spaceId = SPACE_IDS[fullSpaceName];
   if (!spaceId || !fullSpaceName.trim()) {
-    return {
-      success: false,
-      removed: 0,
-      error: msg.unknownSpace(fullSpaceName),
-    };
+    return { success: false, removed: 0, error: msg.unknownSpace(fullSpaceName) };
   }
 
   const url = `https://emergent-commons.mn.co/spaces/${spaceId}/admin/members/all`;
-
   let removed = 0;
   const dryRunSeen = new Set<string>();
 
@@ -526,41 +367,29 @@ export async function removeSpaceMembers({
     await page.waitForSelector(SEL_FLYOUT, { timeout: 60_000 });
     await page.waitForSelector(`${SEL_FLYOUT} ${SEL_TABLE_MEMBERS}`, { timeout: 60_000 });
     await log(msg.memberListLoaded(fullSpaceName));
-    if (dryRun) {
-      await log(msg.dryRunNoRemovals());
-    }
+    if (dryRun) await log(msg.dryRunNoRemovals());
 
     while (true) {
-      if (abortSignal.aborted) {
-        return logAbortAndReturn(log, removed);
-      }
+      if (abortSignal.aborted) return logAbortAndReturn(log, removed);
 
       let picked = await pickFirstEligibleRow(page, dryRun, dryRunSeen);
-
       if (!picked) {
         await scrollFlyout(page);
         await sleep(SCROLL_LOAD_MS);
         picked = await pickFirstEligibleRow(page, dryRun, dryRunSeen);
-        if (!picked) {
-          break;
-        }
+        if (!picked) break;
       }
 
       const { row, meta } = picked;
       const { name, memberId } = meta;
 
-      if (abortSignal.aborted) {
-        return logAbortAndReturn(log, removed);
-      }
+      if (abortSignal.aborted) return logAbortAndReturn(log, removed);
 
       dryRunSeen.add(memberId);
 
       try {
-        await log(dryRun ?
-          msg.dryRunWouldRemove(name, memberId) :
-          msg.removingMember(name, memberId)
-        );
-        await performRemoval(page, row, log, dryRun, logLevel);
+        await log(dryRun ? msg.dryRunWouldRemove(name, memberId) : msg.removingMember(name, memberId));
+        await performRemoval(page, log, memberId, dryRun, logLevel);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return logErrorAndFail(log, removed, message);
@@ -569,6 +398,7 @@ export async function removeSpaceMembers({
       }
 
       if (dryRun) {
+        await settleAfterDryRunInteraction(page, log, logLevel, sleep);
         continue;
       }
 

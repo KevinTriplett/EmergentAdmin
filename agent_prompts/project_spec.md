@@ -9,12 +9,18 @@ never deployed publicly.
 
 Read `agent_prompts/system_prompt.md` at the beginning of each session.
 
-## Stage 1 Scope
+## Stage 1 Scope: removeSpaceMembers task -- DONE
 - Login + session handling
 - Remove all non-admin members from a selected space
 - Frontend with live log streaming, abort, and dry-run toggle
 
-Stage 2 (deferred): Add specific members to a space from a name list.
+## Stage 2 Scope: deploy to server -- DONE
+- prepare project for server deployment
+- generate server setup instructions
+
+## Stage 3 Scope: addSpaceMember task -- NEXT
+- Modify frontend to add one member to all spaces
+- Frontend with live log streaming, abort and headless toggles (no dry-run)
 
 ## Stack
 - Runtime: Node.js
@@ -61,3 +67,6 @@ removeSpaceMembers tasks return: `{ success: boolean, removed?: number, error?: 
 
 ## Environment Variables
 See `.env.example` for required variables. file `.env` has been configured by the user.
+
+## More Detail
+See `clarifications.md` for more detail about each task.

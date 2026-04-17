@@ -19,6 +19,14 @@ const SEL_SPACE_LIST_INPUT = ".MuiPaper-root input[placeholder='Choose Spaces']"
  * `fullSpaceName` and wait until a matching li exists in the popper.
  */
 const SEL_SPACE_LIST_OPTIONS = '.MuiPopper-root li';
+/**
+ * After selecting an option, MUI renders it as a chip (tag) inside the input.
+ * Waiting for the tag containing `fullSpaceName` to appear is the true
+ * postcondition of "the space was successfully picked"; without it a no-op
+ * click on a stale option looks indistinguishable from success until the
+ * final confirm fails far downstream.
+ */
+const SEL_SPACE_TAG = '.MuiBox-root .MuiAutocomplete-tag';
 const SEL_SPACE_LIST_CLOSE = ".MuiPaper-root button[title='Open']";
 const SEL_ADD_TO_SPACE_BUTTON = ".MuiPaper-root button[data-id='dialog-confirm-button']";
 const SEL_TOAST_SUCCESS = '.notifyjs-corner .system-toast-inner.success';
@@ -67,9 +75,13 @@ const msg = {
   searchingFor: (name: string) => `Searching for member: ${name}…`,
   typingSpaceName: (space: string) => `Typing space name: ${space}…`,
   clicking: (label: string) => `Clicking ${label}…`,
+  awaitingSpaceTag: (space: string) =>
+    `Waiting for "${space}" tag to appear in the space list…`,
   abortedByUser: () => ABORTED_BY_USER,
   toastTimeout: (ms: number) =>
     `Success toast "${TOAST_FRAGMENT}" did not appear within ${ms}ms.`,
+  spaceTagMissing: (space: string, ms: number) =>
+    `"${space}" tag did not appear in the space list within ${ms}ms.`,
 } as const;
 
 export type AddSpaceMemberArgs = {
@@ -310,8 +322,38 @@ async function pickSpaceInDialog(
     throw new Error(`Matching space option disappeared before it could be clicked: "${fullSpaceName}"`);
   }
 
-  await log(msg.clicking('space picker close'));
-  await domClick(page, SEL_SPACE_LIST_CLOSE, 'Space list close');
+  /* Postcondition for "the click actually selected the space": the picker now
+   * shows a visible MuiAutocomplete-tag whose text contains fullSpaceName.
+   * Without this check, a no-op click on a stale option is indistinguishable
+   * from success until the confirm step fails downstream. */
+  await log(msg.awaitingSpaceTag(fullSpaceName));
+  try {
+    await page.waitForFunction(
+      (tagSel: string, expected: string) => {
+        const needle = expected.trim().toLowerCase();
+        const tags = Array.from(document.querySelectorAll(tagSel));
+        return tags.some((t) => {
+          const rect = (t as HTMLElement).getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return false;
+          return (t.textContent || '').trim().toLowerCase().includes(needle);
+        });
+      },
+      { timeout: WAIT_POPPER_MS },
+      SEL_SPACE_TAG,
+      fullSpaceName,
+    );
+  } catch {
+    if (logLevel === 'debug') {
+      await logSnapshot(page, SEL_SPACE_TAG, log, 'pickSpaceInDialog-tag-not-visible');
+    }
+    throw new Error(msg.spaceTagMissing(fullSpaceName, WAIT_POPPER_MS));
+  }
+
+  /* NOTE: clarifications.md step "click SEL_SPACE_LIST_CLOSE" is currently skipped.
+   * In practice the picker auto-collapses once the confirm button click fires, and
+   * the close toggle (".MuiPaper-root button[title='Open']") was not found in the
+   * DOM at this point anyway. If we need to reinstate it later, restore a
+   * `domClick(page, SEL_SPACE_LIST_CLOSE, 'Space list close')` call here. */
 }
 
 async function confirmAddAndAwaitToast(

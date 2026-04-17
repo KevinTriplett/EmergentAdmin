@@ -68,6 +68,7 @@ SEL_MEMBER_DROPDOWN = `[data-member-item='${memberId}'] .actions-region a.mighty
 SEL_ADD_MEMBER_TO_SPACE = 'a#menu-list-item-add-to-spaces'
 SEL_SPACE_LIST_INPUT = ".MuiPaper-root input[placeholder='Choose Spaces']"
 SEL_SPACE_LIST_OPTION = ".MuiPopper-root li:firstchild"
+SEL_SPACE_TAG = '.MuiBox-root .MuiAutocomplete-tag'
 SEL_SPACE_LIST_CLOSE = ".MuiPaper-root button[title='Open']"
 SEL_ADD_TO_SPACE_BUTTON = ".MuiPaper-root button[data-id='dialog-confirm-button']"
 SEL_TOAST_SUCCESS = '.notifyjs-corner .system-toast-inner.success'
@@ -123,6 +124,7 @@ Arguments: {fullMemberName: string, memberId: string, fullSpaceName: string}
 1. click SEL_ADD_MEMBER_TO_SPACE
 1. type spaceName into SEL_SPACE_LIST_INPUT
 1. click SEL_SPACE_LIST_OPTION
+1. check that SEL_SPACE_TAG is visible and contains text spaceName
 1. click SEL_SPACE_LIST_CLOSE
 1. click SEL_ADD_TO_SPACE_BUTTON
 1. Verify SEL_TOAST_SUCCESS contains the string fragment 'will be added'

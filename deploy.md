@@ -247,6 +247,7 @@ nvm install           # no-op if .nvmrc version already installed
 nvm use
 
 npm ci --production
+npm run install:browsers
 npm run build
 sudo systemctl restart emergent-admin
 echo "Deployed $(git log -1 --format='%h %s') on node $(node -v)"

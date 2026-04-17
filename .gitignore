@@ -5,3 +5,4 @@
 node_modules
 dist
 .puppeteer-profile
+.cache

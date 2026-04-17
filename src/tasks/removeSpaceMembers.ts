@@ -6,13 +6,19 @@ import { abortedRemovalMessage } from '../abortRemoval.js';
 const SEL_READY = 'body.pace-done #community-app';
 const SEL_FLYOUT = '#flyout-main-content';
 const SEL_TABLE_MEMBERS = '.all-members-list-items';
-const SEL_MEMBER_ROW = '[data-member-item]';
-const SEL_MEMBER_DROPDOWN = '.actions-region a.mighty-drop-down-toggle';
+const SEL_MEMBER_ROWS = '[data-member-item]';
+const SEL_MEMBER_ROW = (memberId: string): string => `[data-member-item='${memberId}']`;
+const SEL_MEMBER_DROPDOWN = (memberId: string): string =>
+  `[data-member-item='${memberId}'] .actions-region a.mighty-drop-down-toggle`;
 const SEL_MEMBER_DROPDOWN_MORE = '#menu-list-item-more-host-FlexSpace-actions .toggle-child-expanded-button';
 const SEL_REMOVE_FROM_SPACE = '#menu-list-item-remove-from-sub-space';
 const SEL_MODAL_CONFIRM = '#modal-content-region .modal-confirm-button';
 const SEL_MODAL_CANCEL = '#modal-content-region .modal-reject-button';
 const SEL_MODAL_REGION = '#modal-content-region';
+
+// === URLS ===
+const spaceUrl = (spaceId: string): string =>
+  `https://emergent-commons.mn.co/spaces/${spaceId}/admin/members/all`;
 
 // === SPACE IDS — Maps display name to MN space ID ===
 export const SPACE_IDS: Record<string, string> = {
@@ -32,6 +38,7 @@ export const SPACE_IDS: Record<string, string> = {
 // === ADMIN IDS — Never remove these members ===
 const ADMIN_IDS = ['7698608', '12314607'];
 
+// === TIMING CONSTANTS ===
 const SCROLL_LOAD_MS = 3000;
 const SCROLL_MAX_RETRIES = 5;
 const WAIT_SHORT_MS = 15_000;
@@ -127,23 +134,6 @@ async function domClick(page: Page, selector: string, label: string): Promise<vo
   if (!found) throw new Error(`${label}: selector not found (${selector})`);
 }
 
-/** DOM click scoped to a member row. */
-async function domClickInRow(page: Page, memberId: string, selector: string, label: string): Promise<void> {
-  const rowSelector = `${SEL_MEMBER_ROW}[data-member-item="${memberId}"]`;
-  const found = await page.evaluate(
-    ({ rowSel, childSel }) => {
-      const row = document.querySelector(rowSel) as HTMLElement | null;
-      if (!row) return false;
-      const el = row.querySelector(childSel) as HTMLElement | null;
-      if (!el) return false;
-      el.click();
-      return true;
-    },
-    { rowSel: rowSelector, childSel: selector },
-  );
-  if (!found) throw new Error(`${label}: row or control not found (row=${rowSelector}, control=${selector})`);
-}
-
 async function disposeHandle(handle: ElementHandle<Element> | null): Promise<void> {
   if (!handle) return;
   if (typeof handle.dispose === 'function') {
@@ -188,10 +178,9 @@ async function logSnapshot(page: Page, selector: string, log: LogFn, stage: stri
 async function openMemberMenu(
   page: Page, memberId: string, log: LogFn, logLevel: LogLevel,
 ): Promise<void> {
-  const rowSelector = `${SEL_MEMBER_ROW}[data-member-item="${memberId}"]`;
-  await waitForSelector(page, rowSelector, WAIT_SHORT_MS);
+  await waitForSelector(page, SEL_MEMBER_ROW(memberId), WAIT_SHORT_MS);
   await log(msg.clicking('member action menu'));
-  await domClickInRow(page, memberId, SEL_MEMBER_DROPDOWN, 'Member action menu');
+  await domClick(page, SEL_MEMBER_DROPDOWN(memberId), 'Member action menu');
 
   try {
     await waitForSelector(page, SEL_MEMBER_DROPDOWN_MORE, WAIT_SHORT_MS);
@@ -313,7 +302,7 @@ async function scrollFlyout(page: Page): Promise<void> {
 }
 
 async function countMemberRows(page: Page): Promise<number> {
-  return page.evaluate((sel) => document.querySelectorAll(sel).length, SEL_MEMBER_ROW);
+  return page.evaluate((sel) => document.querySelectorAll(sel).length, SEL_MEMBER_ROWS);
 }
 
 /**
@@ -342,7 +331,7 @@ async function scrollUntilStable(
 async function pickFirstEligibleRow(
   page: Page, processedIds: Set<string>,
 ): Promise<{ row: ElementHandle<Element>; meta: RowMeta } | null> {
-  const rows = await page.$$(SEL_MEMBER_ROW);
+  const rows = await page.$$(SEL_MEMBER_ROWS);
   for (const row of rows) {
     const meta = await readRowMeta(row);
     if (ADMIN_IDS.includes(meta.memberId)) continue;
@@ -381,7 +370,7 @@ export async function removeSpaceMembers({
     return { success: false, removed: 0, error: msg.unknownSpace(fullSpaceName) };
   }
 
-  const url = `https://emergent-commons.mn.co/spaces/${spaceId}/admin/members/all`;
+  const url = spaceUrl(spaceId);
   let removed = 0;
   const processedIds = new Set<string>();
 
@@ -426,9 +415,9 @@ export async function removeSpaceMembers({
 
       try {
         await page.waitForFunction(
-          (id) => document.querySelector(`[data-member-item="${id}"]`) === null,
+          (sel) => document.querySelector(sel) === null,
           { timeout: WAIT_ROW_UPDATE_MS },
-          memberId,
+          SEL_MEMBER_ROW(memberId),
         );
       } catch {
         return logErrorAndFail(log, removed, msg.removalNotConfirmed(name, memberId));

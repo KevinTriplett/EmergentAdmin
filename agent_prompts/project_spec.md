@@ -18,7 +18,7 @@ Read `agent_prompts/system_prompt.md` at the beginning of each session.
 - prepare project for server deployment
 - generate server setup instructions
 
-## Stage 3 Scope: addSpaceMember task -- NEXT
+## Stage 3 Scope: addSpaceMember task -- DONE
 - Modify frontend to add one member to all spaces
 - Frontend with live log streaming, abort and headless toggles (no dry-run)
 

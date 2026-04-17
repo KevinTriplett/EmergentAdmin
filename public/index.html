@@ -40,6 +40,17 @@
         border-radius: 8px;
         padding: 1rem 1.25rem;
         max-width: 52rem;
+        margin-bottom: 1rem;
+      }
+      input[type='text'] {
+        width: 100%;
+        max-width: 28rem;
+        padding: 0.4rem 0.5rem;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+        background: #0e1014;
+        color: var(--fg);
+        font: inherit;
       }
       .sticky-abort {
         position: sticky;
@@ -192,6 +203,22 @@
       </div>
     </section>
 
+    <section>
+      <h2 style="margin-top: 0; font-size: 1.1rem">Add Member to All Spaces</h2>
+
+      <label for="add-member-name">Full Member Name</label>
+      <input type="text" id="add-member-name" placeholder="e.g. Jane Doe" autocomplete="off" />
+
+      <div style="height: 0.5rem"></div>
+
+      <label for="add-member-id">Member ID</label>
+      <input type="text" id="add-member-id" placeholder="e.g. 12345678" autocomplete="off" inputmode="numeric" />
+
+      <div class="actions">
+        <button type="button" class="primary" id="btn-add-all">Add To ALL Spaces</button>
+      </div>
+    </section>
+
     <div class="log-header">
       <button type="button" id="btn-clear-log">Clear Log</button>
     </div>
@@ -204,6 +231,7 @@
         const resultEl = document.getElementById('result');
         const btnRun = document.getElementById('btn-run');
         const btnRunAll = document.getElementById('btn-run-all');
+        const btnAddAll = document.getElementById('btn-add-all');
         const btnAbort = document.getElementById('btn-abort');
         const btnClear = document.getElementById('btn-clear-log');
         const spaceSelect = document.getElementById('space-select');
@@ -212,6 +240,8 @@
         const dryHint = document.getElementById('dry-hint');
         const abortWrap = document.getElementById('abort-wrap');
         const wsDisconnect = document.getElementById('ws-disconnect');
+        const addMemberName = document.getElementById('add-member-name');
+        const addMemberId = document.getElementById('add-member-id');
 
         let ws = null;
         let reconnectTimer = null;
@@ -221,6 +251,7 @@
           taskRunning = running;
           btnRun.disabled = running;
           btnRunAll.disabled = running;
+          btnAddAll.disabled = running;
           abortWrap.hidden = !running;
           btnAbort.disabled = !running;
         }
@@ -356,6 +387,27 @@
           runTask('/run/remove-all-space-members', {
             headless: chkHeadless.checked,
             dryRun: chkDry.checked,
+          });
+        });
+
+        btnAddAll.addEventListener('click', function () {
+          const name = (addMemberName.value || '').trim();
+          const id = (addMemberId.value || '').trim();
+          if (!name) {
+            appendLog('ERROR: Full Member Name is required.');
+            addMemberName.focus();
+            return;
+          }
+          if (!id) {
+            appendLog('ERROR: Member ID is required.');
+            addMemberId.focus();
+            return;
+          }
+          if (!confirm('Add "' + name + '" (ID ' + id + ') to ALL spaces?')) return;
+          runTask('/run/add-space-member-all-spaces', {
+            fullMemberName: name,
+            memberId: id,
+            headless: chkHeadless.checked,
           });
         });
 

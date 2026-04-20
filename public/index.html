@@ -52,15 +52,6 @@
         color: var(--fg);
         font: inherit;
       }
-      .sticky-abort {
-        position: sticky;
-        top: 0;
-        z-index: 2;
-        background: var(--panel);
-        padding-bottom: 0.75rem;
-        margin: -0.25rem 0 0.75rem;
-        border-bottom: 1px solid var(--border);
-      }
       label,
       .row {
         display: block;
@@ -168,10 +159,6 @@
 
       <div id="ws-disconnect" class="ws-status" hidden>Disconnected</div>
 
-      <div id="abort-wrap" class="sticky-abort" hidden>
-        <button type="button" class="danger" id="btn-abort">Abort</button>
-      </div>
-
       <label for="space-select">Space</label>
       <select id="space-select">
         <option>1. Relating to SELF</option>
@@ -197,9 +184,10 @@
         >
       </div>
 
-      <div class="actions">
+      <div class="actions" id="actions-remove">
         <button type="button" class="primary" id="btn-run">Remove From Selected Space</button>
         <button type="button" class="danger" id="btn-run-all">Remove From ALL Spaces</button>
+        <button type="button" class="danger btn-abort-inline" id="btn-abort-remove" hidden>Abort</button>
       </div>
     </section>
 
@@ -214,8 +202,9 @@
       <label for="add-member-id">Member ID</label>
       <input type="text" id="add-member-id" placeholder="e.g. 12345678" autocomplete="off" inputmode="numeric" />
 
-      <div class="actions">
+      <div class="actions" id="actions-add">
         <button type="button" class="primary" id="btn-add-all">Add To ALL Spaces</button>
+        <button type="button" class="danger btn-abort-inline" id="btn-abort-add" hidden>Abort</button>
       </div>
     </section>
 
@@ -232,28 +221,48 @@
         const btnRun = document.getElementById('btn-run');
         const btnRunAll = document.getElementById('btn-run-all');
         const btnAddAll = document.getElementById('btn-add-all');
-        const btnAbort = document.getElementById('btn-abort');
+        const btnAbortRemove = document.getElementById('btn-abort-remove');
+        const btnAbortAdd = document.getElementById('btn-abort-add');
         const btnClear = document.getElementById('btn-clear-log');
         const spaceSelect = document.getElementById('space-select');
         const chkHeadless = document.getElementById('chk-headless');
         const chkDry = document.getElementById('chk-dry');
         const dryHint = document.getElementById('dry-hint');
-        const abortWrap = document.getElementById('abort-wrap');
+        const actionsRemove = document.getElementById('actions-remove');
+        const actionsAdd = document.getElementById('actions-add');
         const wsDisconnect = document.getElementById('ws-disconnect');
         const addMemberName = document.getElementById('add-member-name');
         const addMemberId = document.getElementById('add-member-id');
 
         let ws = null;
         let reconnectTimer = null;
-        let taskRunning = false;
+        /**
+         * Tracks which section initiated the currently-running task, so the
+         * Abort button appears IN PLACE of the action buttons the user just
+         * clicked rather than elsewhere on the page. Values: 'remove',
+         * 'add', or null when idle.
+         */
+        let runningSection = null;
 
-        function setTaskRunning(running) {
-          taskRunning = running;
-          btnRun.disabled = running;
-          btnRunAll.disabled = running;
-          btnAddAll.disabled = running;
-          abortWrap.hidden = !running;
-          btnAbort.disabled = !running;
+        /**
+         * While a task is running, every non-Abort action button is hidden
+         * (so the UI can't invite mis-clicks on the other section) and a
+         * single Abort button is revealed inline in the action-row of the
+         * section that initiated the run. When the run ends, the reverse
+         * swap happens in both sections.
+         */
+        function setTaskRunning(section) {
+          runningSection = section;
+          const running = section !== null;
+          btnRun.hidden = running;
+          btnRunAll.hidden = running;
+          btnAddAll.hidden = running;
+          btnAbortRemove.hidden = section !== 'remove';
+          btnAbortAdd.hidden = section !== 'add';
+          /* Collapse the non-initiating section's action row entirely so
+           * the UI doesn't leave an empty strip where its buttons were. */
+          actionsRemove.hidden = running && section !== 'remove';
+          actionsAdd.hidden = running && section !== 'add';
         }
 
         function appendLog(message) {
@@ -313,10 +322,10 @@
               if (msg.type === 'log') {
                 appendLog(msg.message);
               } else if (msg.type === 'done') {
-                setTaskRunning(false);
+                setTaskRunning(null);
                 showResult('<strong>Done.</strong><pre>' + JSON.stringify(msg.result, null, 2) + '</pre>', false);
               } else if (msg.type === 'error') {
-                setTaskRunning(false);
+                setTaskRunning(null);
                 showResult('<strong>Error</strong><p>' + escapeHtml(msg.message) + '</p>', true);
               }
             } catch {
@@ -338,15 +347,17 @@
             .replace(/"/g, '&quot;');
         }
 
-        btnAbort.addEventListener('click', function () {
+        function sendAbort() {
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'abort' }));
           }
-        });
+        }
+        btnAbortRemove.addEventListener('click', sendAbort);
+        btnAbortAdd.addEventListener('click', sendAbort);
 
-        async function runTask(endpoint, payload) {
+        async function runTask(section, endpoint, payload) {
           clearResult();
-          setTaskRunning(true);
+          setTaskRunning(section);
           try {
             const res = await fetch(endpoint, {
               method: 'POST',
@@ -358,24 +369,24 @@
             });
             if (res.status === 409) {
               appendLog('ERROR: ' + (body.error || res.statusText));
-              setTaskRunning(false);
+              setTaskRunning(null);
               return;
             }
             if (!res.ok) {
               appendLog('ERROR: ' + (body.error || res.statusText));
-              setTaskRunning(false);
+              setTaskRunning(null);
               showResult('<strong>HTTP ' + res.status + '</strong><pre>' + escapeHtml(JSON.stringify(body, null, 2)) + '</pre>', true);
               return;
             }
-            setTaskRunning(false);
+            setTaskRunning(null);
           } catch (e) {
             appendLog('ERROR: ' + (e && e.message ? e.message : String(e)));
-            setTaskRunning(false);
+            setTaskRunning(null);
           }
         }
 
         btnRun.addEventListener('click', function () {
-          runTask('/run/remove-space-members', {
+          runTask('remove', '/run/remove-space-members', {
             fullSpaceName: spaceSelect.value,
             headless: chkHeadless.checked,
             dryRun: chkDry.checked,
@@ -384,7 +395,7 @@
 
         btnRunAll.addEventListener('click', function () {
           if (!confirm('This will process ALL spaces. Continue?')) return;
-          runTask('/run/remove-all-space-members', {
+          runTask('remove', '/run/remove-all-space-members', {
             headless: chkHeadless.checked,
             dryRun: chkDry.checked,
           });
@@ -404,7 +415,7 @@
             return;
           }
           if (!confirm('Add "' + name + '" (ID ' + id + ') to ALL spaces?')) return;
-          runTask('/run/add-space-member-all-spaces', {
+          runTask('add', '/run/add-space-member-all-spaces', {
             fullMemberName: name,
             memberId: id,
             headless: chkHeadless.checked,

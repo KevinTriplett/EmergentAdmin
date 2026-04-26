@@ -14,6 +14,7 @@ urlLogin = 'https://emergent-commons.mn.co/sign_in'
 urlSpaceMembers = `https://emergent-commons.mn.co/spaces/${spaceId}/admin/members/all`
 urlMembers = 'https://emergent-commons.mn.co/admin/members/all'
 
+
 ### login page
 
 SEL_READY = 'body.pace-done #community-app'
@@ -129,6 +130,46 @@ Arguments: {fullMemberName: string, memberId: string, fullSpaceName: string}
 1. click SEL_ADD_TO_SPACE_BUTTON
 1. Verify SEL_TOAST_SUCCESS contains the string fragment 'will be added'
 1. return success or error message per return type
+
+### identifyMembersToAddToSpaces
+
+The purpose of this is to add a member to all the spaces iff they agree to all 8
+agreements that hold members accountable for how they "show up" developmentally
+in all the spaces. To agree to each agreement requires the member posted a comment
+on an article containing the short agreement plus the intention and
+thought that went into that agreement. The member comments on the article with
+a simple "I agree".
+
+The implementation options:
+1. a cron job running every 30 minutes checks all comments on each
+agreement to see if any new member has commented on all articles. If so, that
+member's name and id is sent to addSpaceMember.
+1. Mighty Networks sends an email everytime a member comments on an article. If
+the member comments on every article, that member's name and id is sent to
+addSpaceMember.
+
+The concerns:
+1. The RoR app running on the same server also runs a cron job that uses a
+headless browser to scrap the Mighty Networks site looking for new requests
+to join the community. This consumes a lot of resources, so running a second
+cron job that consumes a lot of resources might not be a good idea.
+1. A user might write something different, like, "This is great. Agreed." It
+would be difficult to determine if the member is agreeing or disagreeing
+so we can delete the comment and send a direct message via Mighty Networks
+asking the user to submit a new comment of "I agree". Another option, we could
+transform the comment via a regex that looks for "I agree", but it might
+transform "I don't agree" into "I agree".
+1. The email notification is for a single comment and the body of the email
+contains a direct link to the comment which means we have the space id and
+the article id which are both embedded in the link. It also have the text of
+the comment. So we do not need to visit the site unless it's to do something
+like delete the comment and DM the member with the request to report their
+comment with the correct text.
+
+Consider these options and concerns and provide guidance.
+
+###
+
 
 ## Return types
 

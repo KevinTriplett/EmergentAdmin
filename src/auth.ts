@@ -1,4 +1,5 @@
 import type { Page } from 'puppeteer';
+import { writeProfileAccount } from './utils/browser.js';
 
 // === CSS SELECTORS — UPDATE THESE IF MN CHANGES ITS DOM ===
 const SEL_READY = 'body.pace-done #community-app';
@@ -38,6 +39,20 @@ function isExecutionContextDestroyedError(err: unknown): boolean {
 function isDetachedFrameError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return msg.includes('detached Frame') || msg.includes('Attempted to use detached Frame');
+}
+
+async function rememberProfileAccount(
+  email: string | undefined,
+  log: LogFn,
+): Promise<void> {
+  const profileDir = process.env.PUPPETEER_USER_DATA_DIR?.trim();
+  if (!profileDir || !email) return;
+  try {
+    await writeProfileAccount(profileDir, email);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await log(`Warning: could not record profile account binding (${message}).`);
+  }
 }
 
 async function clickFirstWithExactText(page: Page, text: string): Promise<void> {
@@ -225,6 +240,7 @@ export async function login(page: Page, log: LogFn): Promise<{ success: true }> 
 
     await page.waitForSelector(SEL_SIGNED_IN, { timeout: 15_000 });
     await log('Login confirmed.');
+    await rememberProfileAccount(email, log);
     return { success: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -342,6 +358,7 @@ export async function loginIfNeeded(
       await signedIn.dispose();
     }
     await log('Already logged in — skipping login.');
+    await rememberProfileAccount(process.env.MN_EMAIL, log);
     return;
   }
 

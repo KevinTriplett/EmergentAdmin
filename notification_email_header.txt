@@ -1,0 +1,169 @@
+Return-Path: <bounce+6ee37d.c06c8-ec.test=kevintriplett.com@mn.co>
+X-Original-To: ec.test@kevintriplett.com
+Delivered-To: kt@kevintriplett.com
+Authentication-Results: mail.protonmail.ch; dkim=pass (Good 1024 bit
+    rsa-sha256 signature) header.d=mn.co header.a=rsa-sha256
+Authentication-Results: mail.protonmail.ch; dmarc=pass (p=reject dis=none)
+ header.from=mn.co
+Authentication-Results: mail.protonmail.ch; spf=pass smtp.mailfrom=mn.co
+Authentication-Results: mail.protonmail.ch; arc=none smtp.remote-ip=69.72.47.103
+Authentication-Results: mail.protonmail.ch; dkim=pass (1024-bit key) header.d=mn.co
+ header.i=@mn.co header.b="bmNTzHaZ"
+Received: from relay-02.mn.co (relay-02.mn.co [69.72.47.103]) (using TLSv1.2 with cipher
+ ECDHE-RSA-AES256-GCM-SHA384 (256/256 bits)) (No client certificate requested) by
+ mailin053.protonmail.ch (Postfix) with ESMTPS id 4fyGRf060lz3R for
+ <ec.test@kevintriplett.com>; Sat, 18 Apr 2026 02:49:17 +0000 (UTC)
+Received: from mn.co (ec2-52-44-67-169.compute-1.amazonaws.com [52.44.67.169]) by
+ fab940452fcfdf5262887f1b95dfe8a75f1c1abf55bfca7c5c5aa3a3e3cb1f9b with SMTP id
+ 69e2f12ce31382627a93ef5d (version=TLS1.3, cipher=TLS_AES_128_GCM_SHA256); Sat, 18 Apr
+ 2026 02:49:16 GMT
+Dkim-Signature: a=rsa-sha256; v=1; c=relaxed/relaxed; d=mn.co; q=dns/txt; s=krs;
+ t=1776480556; x=1776487756; h=List-Unsubscribe: Content-Transfer-Encoding: Content-Type:
+ MIME-Version: Subject: Subject: Message-ID: To: To: From: From: Date: Sender: Sender;
+ bh=zHUtrrWtmhkR8H4KLgI/pL+nauqWIqkUEedYk0jszvA=;
+ b=bmNTzHaZCiSHh2Y+Tqhy6uFzs+MGo96SFqNFhibVyFAXKaDw8gEfUk+PYgTsPCmFkDsPRZkve+zOxNw+NWDjqhTMNkiAgIokTqz59hfELU/81E6gVHNmb8kCU2u4pPI+hxttg4UeSfBJ/W/4MJSXJHbiNMFrIeWHU+3NDqwfVgQ=
+X-Mailgun-Sid: WyI5ZDFiMSIsImVjLnRlc3RAa2V2aW50cmlwbGV0dC5jb20iLCJjMDZjOCJd
+X-Mailgun-Sending-Ip: 69.72.47.103
+Sender: emergent-commons@mn.co
+Date: Sat, 18 Apr 2026 02:49:15 +0000
+From: Emergent Commons <emergent-commons@mn.co>
+To: ec.test@kevintriplett.com
+Message-Id: <69e2f12ac2342_588efe84114a@mn.co>
+Subject: Kevin Triplett commented on your Post: I agree
+Mime-Version: 1.0
+Content-Type: text/html
+Content-Transfer-Encoding: 7bit
+X-Mailgun-Tag: notification_space_post_comment_create_recent
+List-Unsubscribe: <https://emergent-commons.mn.co/notification_settings/4747401?eat=vzmSj8Qe4kbq8ut_&email=false&utm_content=space_unsubscribe>
+X-Mailgun-Variables: {"network_id":4747401}
+X-Notification-Id: 7902671941
+Tag: notification_space_post_comment_create_recent
+Network-Id: 4747401
+X-Pm-Spam: 0yezJI6YSpyJec91ztFGcjIwoJyLCvXBZcQniisnOERJt9TTVOUdSRQUiwslOjLdFJEL
+ CN0lSXZ1BElETjIbpAuLTsV0MIRkLf1USkVMFRfSUiVUQOsltx4CMSXiwRNSFNF9TRNVTFdUQjIbp0
+ sMFTk1IRl0ESZ0X0Tf1RBTVF0hXQRUF6IiUzWdBJSLCE1ZQXl0OBZ1XETElRZSVQ1JXQxkfPxkQ0QF
+ tI6RCszAWIUjy0QjLjL3YE2LjsSBOaNX0gQWZWag4wuYmv2NccUmuuV2cGZyVNvc2umUcY92ts0lIl
+ IDJRfVkfU5SVFkMJRUSFVflFGU0CV9RT9EDEV0SjIbpwiMCuTINNQDuucjNTM5YxpIGl3RcZBCpzBi
+ bSYh1NyY2pWRZd5ColJWYXYuM9tY2sl0IIJlEfNlTFROl1JQU6yIQWFzdTJCLEUfZVMSET19TTZ0UJ
+ FkRCT6IAuWzs10NINlQQ9lRVQTNpbIjdTBLLJCUBt0XVTI91MVEP0ZXTRlfW5USUQJxI6RCdzBWfwS
+ ivN2cmciUEsOjjnNIbJ3l6ICZSM24wifSi3IcOsni0NWYWau9oiIjiW5abg3itJCLFbz99yY26SIZe
+ JyQE9kUjItocsMzSlBITR0fFJFUERDllPVE6iITMwCiiMlUiOz0gxLjTCJLQIS624SMCLfJViZGfWd
+ da5Wm6IybyeQJ9EUk7jpIIlmtldWY2Xh5UibWoiJOcR3hft2YmZul90ZVlW5dZ9Fwy8VdDM2IMwMDs
+ yIMI1mhfxWa3MyB1vX2sGVZIojipFWbDbwN0tciyjAMNAjxuYDMHciQJtLCsWlYXNzww9lcmci9owI
+ jwjALMID45kDNTO4kM0NzyzMMNIjsh1mIWa0xh0ZXt2VXYVmkulGZ1Zt9Rlb26CIbIlmusZGd2b0F1
+ 1L2pHRbblGuhV3ZCbl11zNSsWFbbICsfBnI3chBI6bSwC4MMMD05YjNzNyAcyODzjMNOMT0wJCL3Xw
+ N1fYWzmFYZIS6w4CMDM0MY5NjyzANOcDyzMjNTO0MJwLC33NXaRXj09Fa1bw9lzaGuGlaZIy6w4CMD
+ M4AEzOT2jEMMkj30ETNzN3MJyLCfW5dbFmt6ISZmIsF1mbC0WFZdJXlw1ycVdz9l0d2i2gYf1X9zJC
+ LmckloiIjljlNMYmxzEzMzN2EFhYmymQMYcj05ATMnI91
+X-Pm-Origin: external
+X-Pm-Transfer-Encryption: TLSv1.2 with cipher ECDHE-RSA-AES256-GCM-SHA384 (256/256 bits)
+X-Pm-Content-Encryption: on-delivery
+X-Pm-Spamscore: 1
+X-Pm-Spam-Action: inbox
+X-Pm-List-Identifier: @emergent-commons@mn.co
+
+
+-----BEGIN PGP MESSAGE-----
+Version: ProtonMail
+
+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
+0MxgkS9xmvSdYRN5uVH6HdRrnKDeN1QfKJsbQ2JGaUStV1DCISANZj0SYi9p
+FXMq47oSejVMNC6UMa4smqSTtXWCKoTCtpkkY6uxrKoZsi2/GCJuVEMKKGZQ
+LmdtVMiUSquJDS5uTirvb/X5H5fSx9TSsEEJyRRZX5N7LRzV83Xla5KUhXRS
+KOgoGdGZXQgVfF5mVxjpKyCdxkUPgdvoHrJ03z3qGqmjrrJNIpSlLehqm62h
+3nP9nQblDWQ0jboeBKHD2nLcjhe6z/+FdmzWjlr3wlxc4haBrkHQ+tVI7UWt
+QO8Ui/j8I98pqUUOQo0AGZJ3Xh5Lqr9dICYh1W5/P0Ir/K77woQeZb0EHXrj
+4C63T4+xv9l05Vq3Vtv9pk74du8In4fSMPSR5BV/n+ZF6/oOGSnW96FBs7xi
+e7kJ0S7zuTwdcLFscMtCrDgSqyEVt0FIOUYuNbA/p0shci10OPy/5VCfL9P6
+OqU3YXRI8kqJS0lqa7KHQ7Zu0dTHglxJw7jf4H85bNKQ3JWFUB1m5dFKvrFe
+E/zZgQerqL8d4sPVoE3pheiWOVclOMpgFK/KrFOJKLOqJ99c2SsOk9TpRwfl
+iXC/pEntcG/BfKvo7R9MMja8FYDORAFxRx4Oa+gWcJ5TxJGlxt3GeUAoD9+0
+z37lEzGOqXb48d6kOPeT+qSxVJwVjdoPp9oWcDkoHg/n0tzFTtuxxFotAZWr
+3oNTLW7bVIhfLa8yzS7mT0r2I7NmsDOqtZAVz5S9oLoosiyuMl+DePo0sDkh
+J2qw6PjkKPqw7Deyb1Ybb/biFcr7/dy51rabjKXtToWz3Pt6KS1X3cCUo2Zt
+1mfQvdlMdsCc6PzZlKtZSaLcCAMCDX20QjfWAk9+W0kwVjjYT1/DaTU2VzcI
+K0P67i3CPIdzTKWnR/yHbzw2A1DS5up0m6Pi5+TfkbHZd6Ov7NK7YmDX+JbA
+oL9l0FLuIRIvL8EgJXWmsHKX8qTGFwGNDPPldT1Zq3hoLjXMvuUP6blstCJh
+zMUuhFerrz87iTuEZAH1BM9UTsUI/CXZS6gMW0gkV58v/pfzEpuqZLwo7e2e
+COW2FPUffd3EG1zEMraYlNBX75+znZ9IN3YuhKJAK5VKdooSY5ZjG5k6PEHc
+Jq4vMkFS/WlYxLxSZAttmEbfAbuPIy2poly37e+j2f8124eHQKErmj14scPK
+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
+m3bbfH6A9rFW60ZDQPUBHJaq2HJcLXad
+=TMCx
+-----END PGP MESSAGE-----

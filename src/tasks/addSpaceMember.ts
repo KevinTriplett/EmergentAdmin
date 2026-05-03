@@ -56,7 +56,8 @@ const KEYSTROKE_DELAY_MS = 30;
 
 // === TEXT FRAGMENTS ===
 const TOAST_FRAGMENT = 'will be added';
-const ALREADY_A_MEMBER = 'Already a member';
+/** Human-readable sentinel returned in `error` when the member is already in the space. */
+export const ALREADY_A_MEMBER = 'Already a member';
 const ABORTED_BY_USER = 'Aborted by user';
 
 export type LogLevel = 'light' | 'debug';

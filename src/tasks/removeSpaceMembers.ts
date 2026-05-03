@@ -36,7 +36,11 @@ export const SPACE_IDS: Record<string, string> = {
 };
 
 // === ADMIN IDS — Never remove these members ===
-const ADMIN_IDS = ['7698608', '12314607'];
+const ADMIN_IDS = [
+  '7154088', // Kai Mantsch
+  '7698608', // Kevin Triplett
+  '39358139' // Commons Gatekeeper
+];
 
 // === TIMING CONSTANTS ===
 const SCROLL_LOAD_MS = 3000;

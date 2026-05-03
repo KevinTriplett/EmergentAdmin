@@ -40,6 +40,18 @@ SEL_REMOVE_FROM_SPACE = '#menu-list-item-remove-from-sub-space'
 SEL_MODAL_CONFIRM = '#modal-content-region .modal-confirm-button'
 SEL_MODAL_CANCEL = '#modal-content-region .modal-reject-button'
 SEL_MODAL_REGION = '#modal-content-region'
+SEL_NAME_TH = "[title='Member Name']"
+SEL_NAME_TD = `td:nth-child(${colIndexName})`
+SEL_MEMBER_ID_TD
+SEL_JOINED_TH = "[title='Joined Network']"
+SEL_NAME_TD = `td:nth-child(${colIndexJoined})`
+SEL_ACTIVE_TH = "[title='Last Active']"
+SEL_NAME_TD = `td:nth-child(${colIndexActive})`
+SEL_NAME_LI = ":has(+ [title='Name'])"
+SEL_JOINED_LI = ":has(+ [title='Joined Network'])"
+SEL_ACTIVE_LI = ":has(+ [title='Last Active'])"
+SEL_SORTED_BY_DROPDOWN = '.sorted-by-region a.mighty-drop-down-toggle'
+SEL_SORTED_BY_LAST_ACTIVE = '#menu-list-item-last_visit_at_desc'
 
 spaceIds = {
     '1. Relating to SELF': '7330330',
@@ -133,12 +145,12 @@ Arguments: {fullMemberName: string, memberId: string, fullSpaceName: string}
 
 ### identifyMembersToAddToSpaces
 
-The purpose of this is to add a member to all the spaces iff they agree to all 8
-agreements that hold members accountable for how they "show up" developmentally
-in all the spaces. To agree to each agreement requires the member posted a comment
-on an article containing the short agreement plus the intention and
-thought that went into that agreement. The member comments on the article with
-a simple "I agree".
+The purpose of this is to add a member to all the spaces iff they agree to the
+community agreements that hold members accountable for how they "show up"
+developmentally in all the spaces. To agree requires the member to post a
+comment of the form "I agree" on the agreement article. (Historically this
+was an 8-article gate; the architecture is N-aware so the threshold is
+configurable in `src/config/agreements.ts`, currently set to 1.)
 
 The implementation options:
 1. a cron job running every 30 minutes checks all comments on each
@@ -168,7 +180,25 @@ comment with the correct text.
 
 Consider these options and concerns and provide guidance.
 
-###
+### collectActiveMemberList
+
+Purpose: export to file the active member list from scraping the urlMembers page. The page is an infinite scroll and is either a table with columns or unordered list with divs nested within <li> elements, depending upon viewport size.
+
+Process:
+
+1. visit urlMembers
+1. determine whether SEL_TABLE_MEMBERS is a <table> or <ul> in order to use the correct SEL_ for each member iteration
+1. click the SEL_SORTED_BY_DROPDOWN
+1. click the SEL_SORTED_BY_LAST_ACTIVE
+1. wait for SEL_TABLE_MEMBERS to be re-rendered
+1. scroll SEL_TABLE_MEMBERS until finished (look for how this is done in other tasks)
+1. for each SEL_MEMBER_ROW starting with the first member
+    1. get the name via `textContent.trim()` using SEL_NAME_* (note: use SEL_NAME_TD for tables and SEL_NAME_LI for lists)
+    1. get the text-formatted date via `textContent.trim()` using SEL_JOINED_* (note: SEL_JOINED_TD or SEL_JOINED_LI)
+    1. get the text-formatted date via `textContent.trim()` using SEL_ACTIVE_* (note: SEL_ACTIVE_TD and SEL_ACTIVE_LI)
+    1. if either the SEL_ACTIVE date is more than 90 days prior to today's date or SEL_JOINED is more than 1 year prior to today's date, break out of the loop and discard this member's data
+1. write the data to a csv file in the public directory on the server with header row "NAME, JOINED, LAST ACTIVE"
+
 
 
 ## Return types

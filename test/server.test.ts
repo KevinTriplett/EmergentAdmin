@@ -5,6 +5,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Page } from 'puppeteer';
 import { createApp } from '../src/server.js';
+import { openAgreementsStore } from '../src/state/agreementsStore.js';
 
 function postJson(
   server: Server,
@@ -69,6 +70,7 @@ describe('createApp', () => {
 
   const removeSpaceMembers = vi.fn();
   const addSpaceMember = vi.fn();
+  const sendRunLogEmail = vi.fn().mockResolvedValue(undefined);
 
   beforeEach(() => {
     close.mockClear();
@@ -76,6 +78,7 @@ describe('createApp', () => {
     launchBrowser.mockReset();
     removeSpaceMembers.mockReset();
     addSpaceMember.mockReset();
+    sendRunLogEmail.mockClear();
   });
 
   function buildMockPage(): Page {
@@ -422,6 +425,147 @@ describe('createApp', () => {
       expect(res.body.alreadyMemberCount).toBe(1);
       expect(res.body.addedCount).toBe(res.body.spaces.length - 1);
       expect(res.body.failureCount).toBe(0);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // POST /run/reconcile-commons-membership (Stage 4c)
+  // -------------------------------------------------------------------------
+
+  it('returns 404 when agreements store is not configured', async () => {
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/reconcile-commons-membership').send({});
+      expect(res.status).toBe(404);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('returns enqueued list for members who meet agreement threshold', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    addSpaceMember.mockResolvedValue({ success: true });
+
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    store.recordAgreement({
+      memberId: '70001',
+      fullName: 'Reconcile Tester',
+      articleId: 'article-x',
+      commentId: 'c1',
+      commentedAt: Date.now(),
+      source: 'email',
+    });
+
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+    });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/reconcile-commons-membership').send({});
+      expect(res.status).toBe(200);
+      expect(res.body.enqueued).toBe(1);
+      expect(res.body.members).toEqual([
+        { memberId: '70001', fullName: 'Reconcile Tester', agreementCount: 1 },
+      ]);
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Admin-email-on-run hook
+  // -------------------------------------------------------------------------
+
+  it('calls sendRunLogEmail with captured log lines + success summary on success', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    removeSpaceMembers.mockImplementation(async ({ log }: { log: (m: string) => void }) => {
+      log('doing things');
+      log('done things');
+      return { success: true, removed: 2 };
+    });
+
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember, sendRunLogEmail });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-members').send({
+        fullSpaceName: 'Marketplace',
+        dryRun: false,
+        headless: true,
+      });
+      expect(res.status).toBe(200);
+
+      /* The email is fire-and-forget in a finally block, so we may need to
+       * yield a tick for the scheduled send to land. Poll briefly. */
+      await expect.poll(() => sendRunLogEmail.mock.calls.length).toBeGreaterThan(0);
+
+      const payload = sendRunLogEmail.mock.calls[0][0];
+      expect(payload.outcome).toBe('success');
+      expect(payload.taskName).toContain('Marketplace');
+      expect(payload.summary).toContain('2 removed');
+      expect(payload.logLines).toEqual(expect.arrayContaining(['doing things', 'done things']));
+      expect(payload.result).toEqual({ success: true, removed: 2 });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('calls sendRunLogEmail with outcome=error when the task throws', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    removeSpaceMembers.mockRejectedValue(new Error('boom'));
+
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember, sendRunLogEmail });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-members').send({
+        fullSpaceName: 'Marketplace',
+      });
+      expect(res.status).toBe(500);
+
+      await expect.poll(() => sendRunLogEmail.mock.calls.length).toBeGreaterThan(0);
+
+      const payload = sendRunLogEmail.mock.calls[0][0];
+      expect(payload.outcome).toBe('error');
+      expect(payload.summary).toContain('boom');
+      expect(payload.result).toEqual({ error: 'boom' });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('does not let sendRunLogEmail failures affect the HTTP response', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    removeSpaceMembers.mockResolvedValue({ success: true, removed: 0 });
+    const throwingEmail = vi.fn().mockRejectedValue(new Error('smtp down'));
+
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      sendRunLogEmail: throwingEmail,
+    });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-members').send({
+        fullSpaceName: 'Marketplace',
+      });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ success: true, removed: 0 });
+      await expect.poll(() => throwingEmail.mock.calls.length).toBeGreaterThan(0);
     } finally {
       await closeServer(server);
     }

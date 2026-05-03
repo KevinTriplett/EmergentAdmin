@@ -1,9 +1,5 @@
 # Agent Prompt: addSpaceMembers.ts
 
-DO NOT BUILD THIS,
-STOP AND INFORM USER THAT MEMBER NAMES MAY BE DUPLICATED AND
-THAT MEMBER IDS ARE UNIQUE AND THE WAY TO GO.
-
 Build `src/tasks/addSpaceMembers.ts` for a Puppeteer automation project.
 
 ## Exports

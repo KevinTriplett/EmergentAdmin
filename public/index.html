@@ -208,6 +208,18 @@
       </div>
     </section>
 
+    <section>
+      <h2 style="margin-top: 0; font-size: 1.1rem">Reconcile commons membership</h2>
+      <p style="margin: 0 0 0.65rem; color: var(--muted); font-size: 0.9rem">
+        Stage 4c: enqueue a background job for each member who has met the agreements threshold in SQLite, so they
+        are (re-)added to all configured spaces. Work runs in the same queue as agreement-email auto-adds. This
+        server must have the EC admin agreements store enabled; otherwise the request returns HTTP 404.
+      </p>
+      <div class="actions">
+        <button type="button" class="primary" id="btn-reconcile-membership">Enqueue reconcile</button>
+      </div>
+    </section>
+
     <div class="log-header">
       <button type="button" id="btn-clear-log">Clear Log</button>
     </div>
@@ -223,6 +235,7 @@
         const btnAddAll = document.getElementById('btn-add-all');
         const btnAbortRemove = document.getElementById('btn-abort-remove');
         const btnAbortAdd = document.getElementById('btn-abort-add');
+        const btnReconcileMembership = document.getElementById('btn-reconcile-membership');
         const btnClear = document.getElementById('btn-clear-log');
         const spaceSelect = document.getElementById('space-select');
         const chkHeadless = document.getElementById('chk-headless');
@@ -257,6 +270,7 @@
           btnRun.hidden = running;
           btnRunAll.hidden = running;
           btnAddAll.hidden = running;
+          btnReconcileMembership.disabled = running;
           btnAbortRemove.hidden = section !== 'remove';
           btnAbortAdd.hidden = section !== 'add';
           /* Collapse the non-initiating section's action row entirely so
@@ -420,6 +434,56 @@
             memberId: id,
             headless: chkHeadless.checked,
           });
+        });
+
+        btnReconcileMembership.addEventListener('click', async function () {
+          if (
+            !confirm(
+              'Enqueue commons membership reconcile for everyone at the agreements threshold?',
+            )
+          )
+            return;
+          clearResult();
+          appendLog('[reconcile] POST /run/reconcile-commons-membership …');
+          try {
+            const res = await fetch('/run/reconcile-commons-membership', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            });
+            const body = await res.json().catch(function () {
+              return {};
+            });
+            if (res.status === 404) {
+              appendLog('[reconcile] ERROR: endpoint not configured (404). Agreements store disabled on server.');
+              showResult(
+                '<p><strong>404</strong> — This server did not enable the EC admin agreements store, so reconcile is unavailable.</p>',
+                true,
+              );
+              return;
+            }
+            if (!res.ok) {
+              appendLog('ERROR: ' + (body.error || res.statusText));
+              showResult(
+                '<strong>HTTP ' + res.status + '</strong><pre>' +
+                  escapeHtml(JSON.stringify(body, null, 2)) +
+                  '</pre>',
+                true,
+              );
+              return;
+            }
+            var n =
+              typeof body.enqueued === 'number' ? body.enqueued : '?';
+            appendLog('[reconcile] Enqueued repair job(s) for ' + n + ' member(s).');
+            showResult(
+              '<strong>Reconcile enqueued</strong><pre>' +
+                escapeHtml(JSON.stringify(body, null, 2)) +
+                '</pre>',
+              false,
+            );
+          } catch (e) {
+            appendLog('ERROR: ' + (e && e.message ? e.message : String(e)));
+          }
         });
 
         connectWs();

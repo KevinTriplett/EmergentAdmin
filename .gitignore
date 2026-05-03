@@ -1,4 +1,3 @@
-.DS_Store
 .env
 .env.local
 !.env.example
@@ -6,3 +5,4 @@ node_modules
 dist
 .puppeteer-profile
 .cache
+data

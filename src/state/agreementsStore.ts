@@ -42,6 +42,30 @@ export type EligibleCommonsMember = {
   agreementCount: number;
 };
 
+export type AgreementProgressMember = {
+  memberId: string;
+  fullName: string;
+  distinctAgreementArticles: number;
+};
+
+export type GetAgreementsOverviewOpts = {
+  /** Max rows returned for eligible + in-progress lists (counts stay exact). Default 250. */
+  maxListedMembers?: number;
+};
+
+/** Read-only rollup for Stage 4d admin UI / JSON status endpoint. */
+export type AgreementsOverview = {
+  requiredAgreementCount: number;
+  distinctMembersWithAgreement: number;
+  totalAgreementRows: number;
+  eligibleCount: number;
+  inProgressMemberCount: number;
+  commonsAddedMemberCount: number;
+  processedEmailCount: number;
+  eligibleMembers: readonly EligibleCommonsMember[];
+  inProgressMembers: readonly AgreementProgressMember[];
+};
+
 export interface AgreementsStore {
   recordAgreement(input: RecordAgreementInput): RecordAgreementResult;
   countAgreements(memberId: string): number;
@@ -65,6 +89,7 @@ export interface AgreementsStore {
    * repair runs without scraping MN HTML.
    */
   listMembersEligibleForCommonsAdd(): readonly EligibleCommonsMember[];
+  getAgreementsOverview(opts?: GetAgreementsOverviewOpts): AgreementsOverview;
   close(): void;
 }
 
@@ -159,6 +184,54 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
        GROUP BY m.member_id, m.full_name
        HAVING agreement_count >= ?`,
     ),
+    countEligible: db.prepare<[number], { n: number }>(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT m.member_id
+         FROM members m
+         INNER JOIN agreements a ON a.member_id = m.member_id
+         GROUP BY m.member_id
+         HAVING COUNT(DISTINCT a.article_id) >= ?
+       ) t`,
+    ),
+    eligibleForCommonsLimited: db.prepare<[number, number], { member_id: string; full_name: string; agreement_count: number }>(
+      `SELECT m.member_id, m.full_name, COUNT(DISTINCT a.article_id) AS agreement_count
+       FROM members m
+       INNER JOIN agreements a ON a.member_id = m.member_id
+       GROUP BY m.member_id, m.full_name
+       HAVING agreement_count >= ?
+       ORDER BY m.full_name COLLATE NOCASE ASC
+       LIMIT ?`,
+    ),
+    distinctAgreementMembersCount: db.prepare<[], { n: number }>(
+      `SELECT COUNT(DISTINCT member_id) AS n FROM agreements`,
+    ),
+    totalAgreementRowsCount: db.prepare<[], { n: number }>(
+      `SELECT COUNT(*) AS n FROM agreements`,
+    ),
+    commonsAddedCount: db.prepare<[], { n: number }>(
+      `SELECT COUNT(*) AS n FROM members WHERE added_at IS NOT NULL`,
+    ),
+    processedEmailsCountStmt: db.prepare<[], { n: number }>(
+      `SELECT COUNT(*) AS n FROM processed_emails`,
+    ),
+    inProgressLimited: db.prepare<[number, number], { member_id: string; full_name: string; distinct_n: number }>(
+      `SELECT m.member_id, m.full_name, COUNT(DISTINCT a.article_id) AS distinct_n
+       FROM members m
+       INNER JOIN agreements a ON a.member_id = m.member_id
+       GROUP BY m.member_id, m.full_name
+       HAVING COUNT(DISTINCT a.article_id) >= 1 AND COUNT(DISTINCT a.article_id) < ?
+       ORDER BY COUNT(DISTINCT a.article_id) ASC, m.full_name COLLATE NOCASE ASC
+       LIMIT ?`,
+    ),
+    countInProgressMembers: db.prepare<[number], { n: number }>(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT m.member_id
+         FROM members m
+         INNER JOIN agreements a ON a.member_id = m.member_id
+         GROUP BY m.member_id
+         HAVING COUNT(DISTINCT a.article_id) >= 1 AND COUNT(DISTINCT a.article_id) < ?
+       ) t`,
+    ),
   };
 
   /**
@@ -234,6 +307,49 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
         fullName: r.full_name,
         agreementCount: r.agreement_count,
       }));
+    },
+    getAgreementsOverview(opts?: GetAgreementsOverviewOpts) {
+      const maxListedMembers = opts?.maxListedMembers ?? 250;
+
+      const distinctMembersWithAgreement =
+        (statements.distinctAgreementMembersCount.get() as { n: number }).n;
+      const totalAgreementRows = (statements.totalAgreementRowsCount.get() as { n: number }).n;
+      const eligibleCount =
+        (statements.countEligible.get(requiredAgreementCount) as { n: number }).n;
+      const inProgressMemberCount =
+        (statements.countInProgressMembers.get(requiredAgreementCount) as { n: number }).n;
+      const commonsAddedMemberCount = (statements.commonsAddedCount.get() as { n: number }).n;
+      const processedEmailCount =
+        (statements.processedEmailsCountStmt.get() as { n: number }).n;
+
+      const eligibleRows = statements.eligibleForCommonsLimited.all(
+        requiredAgreementCount,
+        maxListedMembers,
+      );
+      const eligibleMembers = eligibleRows.map((r) => ({
+        memberId: r.member_id,
+        fullName: r.full_name,
+        agreementCount: r.agreement_count,
+      }));
+
+      const inRows = statements.inProgressLimited.all(requiredAgreementCount, maxListedMembers);
+      const inProgressMembers = inRows.map((r) => ({
+        memberId: r.member_id,
+        fullName: r.full_name,
+        distinctAgreementArticles: r.distinct_n,
+      }));
+
+      return {
+        requiredAgreementCount,
+        distinctMembersWithAgreement,
+        totalAgreementRows,
+        eligibleCount,
+        inProgressMemberCount,
+        commonsAddedMemberCount,
+        processedEmailCount,
+        eligibleMembers,
+        inProgressMembers,
+      };
     },
     close() {
       db.close();

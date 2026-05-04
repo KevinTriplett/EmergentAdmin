@@ -63,8 +63,7 @@ spaceIds = {
     '7. EC Announcements and Highlights': '4747426',
     '8. Miscellaneous': '9325627',
     'Creative Center': '5722465',
-    'Marketplace': '5627234',
-    'Playground': '23462808'
+    'Marketplace': '5627234'
 }
 
 adminIds = [

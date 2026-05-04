@@ -134,6 +134,47 @@ describe('agreementsStore', () => {
     });
   });
 
+  describe('getAgreementsOverview', () => {
+    it('returns zeros when the DB is empty', () => {
+      const o = store.getAgreementsOverview();
+      expect(o.requiredAgreementCount).toBe(REQUIRED);
+      expect(o.distinctMembersWithAgreement).toBe(0);
+      expect(o.totalAgreementRows).toBe(0);
+      expect(o.eligibleCount).toBe(0);
+      expect(o.inProgressMemberCount).toBe(0);
+      expect(o.commonsAddedMemberCount).toBe(0);
+      expect(o.processedEmailCount).toBe(0);
+      expect(o.eligibleMembers).toEqual([]);
+      expect(o.inProgressMembers).toEqual([]);
+    });
+
+    it('counts processed emails independently of agreements', () => {
+      store.markEmailProcessed('m1');
+      store.markEmailProcessed('m2');
+      const o = store.getAgreementsOverview();
+      expect(o.processedEmailCount).toBe(2);
+    });
+
+    it('counts in-progress vs eligible memberships', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 2 });
+      try {
+        tiny.recordAgreement(agreement('p1', 'x1'));
+        tiny.recordAgreement(agreement('p2', 'y1'));
+        tiny.recordAgreement(agreement('p2', 'y2'));
+        const ov = tiny.getAgreementsOverview();
+        expect(ov.distinctMembersWithAgreement).toBe(2);
+        expect(ov.totalAgreementRows).toBe(3);
+        expect(ov.eligibleCount).toBe(1);
+        expect(ov.inProgressMemberCount).toBe(1);
+        expect(ov.eligibleMembers[0]?.memberId).toBe('p2');
+        expect(ov.eligibleMembers[0]?.agreementCount).toBe(2);
+        expect(ov.inProgressMembers.map((x) => x.memberId)).toContain('p1');
+      } finally {
+        tiny.close();
+      }
+    });
+  });
+
   describe('processed_emails', () => {
     it('remembers processed message ids', () => {
       expect(store.hasProcessedEmail('msg-1')).toBe(false);

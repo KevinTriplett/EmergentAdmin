@@ -22,7 +22,7 @@ Read `agent_prompts/system_prompt.md` at the beginning of each session.
 - Modify frontend to add one member to all spaces
 - Frontend with live log streaming, abort and headless toggles (no dry-run)
 
-## Stage 4 Scope: Agreements Watcher -- IN PROGRESS
+## Stage 4 Scope: Agreements Watcher -- MOSTLY DONE
 Architecture plan: `.cursor/plans/agreements_watcher_*.plan.md`.
 Five sub-stages (4a Foundation, 4b DM moderation, 4c Reconciliation cron,
 4d Admin UI, 4e Change of heart).
@@ -68,10 +68,14 @@ same `TaskScheduler` as IMAP. Optional `RECONCILE_COMMONS_CRON`; manual
 
 *(Stage 4b DM moderation deliberately skipped.)*
 
-### Stage 4d: Admin UI -- PARTIAL
+### Stage 4d: Admin UI -- DONE
 
-- **DONE:** Commons membership reconcile from the admin UI (`Enqueue reconcile`).
-- **PENDING:** Agreements status overview, poll-status / richer agreements UX.
+- **`GET /status/agreements`** — JSON rollup: SQLite `AgreementsOverview` + configured `AGREEMENT_ARTICLES`
+  + optional IMAP watcher snapshot (`pollIntervalMs`, last manual poll + `PollResult`).
+- **`POST /run/poll-agreements-mailbox`** — one-shot `ImapPoller.pollOnce` when the runtime wires the hook;
+  responds with Stage 4a poll counters (`fetched`, `newAgreements`, …) or HTTP 404.
+- **`public/index.html`** unified **Agreements & commons membership** card: live dashboard (refresh on load /
+  Refresh), inbox poll button when IMAP telemetry is present, **Enqueue reconcile** (Stage 4c).
 
 ### Stage 4e: Change of heart -- PENDING
 Detect edits/deletes/new-disagreements during reconciliation; DM the

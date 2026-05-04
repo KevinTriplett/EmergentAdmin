@@ -35,7 +35,6 @@ from the github repo to the server.
   - 8. Miscellaneous
   - Creative Center
   - Marketplace
-  - Playground
 
 **Options:**
 - Checkbox: "Headless mode" — default CHECKED (true).

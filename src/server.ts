@@ -27,8 +27,9 @@ import {
   createImapPoller,
   openImapConnection,
   type ImapPoller,
+  type PollResult,
 } from './ingestion/imapPoller.js';
-import { REQUIRED_AGREEMENT_COUNT } from './config/agreements.js';
+import { AGREEMENT_ARTICLES, REQUIRED_AGREEMENT_COUNT } from './config/agreements.js';
 import { buildAddToAllSpacesJob, ALREADY_A_MEMBER } from './tasks/addToAllSpacesJob.js';
 import { enqueueCommonsMembershipRepairJobs } from './tasks/membershipReconcile.js';
 import cron from 'node-cron';
@@ -53,10 +54,23 @@ export type CreateAppDeps = {
   sendRunLogEmail?: typeof defaultSendRunLogEmail;
   /**
    * Optional agreements store. When provided, persists agreement state and
-   * registers Stage 4c `POST /run/reconcile-commons-membership`. IMAP startup
-   * is wired in `server.ts` when agreements env is complete.
+   * registers Stage 4c `POST /run/reconcile-commons-membership` + Stage 4d
+   * agreements status endpoints when the store exists. Optional IMAP hooks
+   * enable `POST /run/poll-agreements-mailbox`.
    */
   agreementsStore?: AgreementsStore;
+  /** Manual IMAP inbox poll (production wires `ImapPoller.pollOnce`). */
+  agreementsImapPollOnce?: () => Promise<PollResult>;
+  /** Live IMAP poller telemetry for `/status/agreements`. */
+  agreementsImapSnapshot?: () => AgreementsImapRuntimeSnapshot;
+};
+
+/** Mutable slice of-process state for `/status/agreements` (filled by poll wire-up). */
+export type AgreementsImapRuntimeSnapshot = {
+  watcherEnabled: boolean;
+  pollIntervalMs: number;
+  lastPollCompletedAt: string | null;
+  lastPollResult: PollResult | null;
 };
 
 export type CreateAppResult = {
@@ -273,11 +287,41 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
     await runExclusiveBrowserTask(res, job);
   });
 
-  // ---------------------------------------------------------------------------
-  // Stage 4c: commons membership reconcile (repair add-to-all-spaces)
-  // ---------------------------------------------------------------------------
+  // -----------------------------------------------------------------------
+  // Stage 4d: agreements dashboard (read-only SQLite + optional IMAP meta)
+  // -----------------------------------------------------------------------
 
   if (deps.agreementsStore) {
+    app.get('/status/agreements', (_req: Request, res: Response) => {
+      const store = deps.agreementsStore!;
+      const dbOverview = store.getAgreementsOverview();
+      const imap = deps.agreementsImapSnapshot?.() ?? null;
+      res.status(200).json({
+        db: dbOverview,
+        imap,
+        configuredAgreementArticles: AGREEMENT_ARTICLES.map((a) => ({
+          articleId: a.articleId,
+          spaceId: a.spaceId,
+          title: a.title,
+          url: a.url,
+        })),
+      });
+    });
+
+    app.post('/run/poll-agreements-mailbox', async (_req: Request, res: Response) => {
+      if (!deps.agreementsImapPollOnce) {
+        res.status(404).json({ error: 'IMAP poller not configured on this process' });
+        return;
+      }
+      try {
+        const result = await deps.agreementsImapPollOnce();
+        res.status(200).json(result);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        res.status(500).json({ error: message });
+      }
+    });
+
     app.post('/run/reconcile-commons-membership', async (_req: Request, res: Response) => {
       const store = deps.agreementsStore!;
       const members = enqueueCommonsMembershipRepairJobs(
@@ -356,8 +400,22 @@ if (isMainModule) {
     Boolean(process.env.IMAP_PASSWORD);
 
   let agreementsStore: AgreementsStore | undefined;
+  /** Set immediately after createApp uses the closure shape; polls run only after assignment. */
   let imapPoller: ImapPoller | undefined;
   let reconcileCronTask: ReturnType<typeof cron.schedule> | undefined;
+
+  const agreementsImapScratch: {
+    lastPollCompletedAt: string | null;
+    lastPollResult: PollResult | null;
+  } = {
+    lastPollCompletedAt: null,
+    lastPollResult: null,
+  };
+
+  const imapPollIntervalMs =
+    Number(process.env.IMAP_POLL_INTERVAL_MS) > 0
+      ? Number(process.env.IMAP_POLL_INTERVAL_MS)
+      : 5 * 60 * 1000;
 
   if (agreementsEnabled) {
     agreementsStore = openAgreementsStore({
@@ -371,6 +429,25 @@ if (isMainModule) {
     removeSpaceMembers: defaultRemoveSpaceMembers,
     addSpaceMember: defaultAddSpaceMember,
     agreementsStore,
+    agreementsImapPollOnce:
+      agreementsEnabled && agreementsStore
+        ? async () => {
+            if (!imapPoller) throw new Error('IMAP poller not initialized yet');
+            const result = await imapPoller.pollOnce();
+            agreementsImapScratch.lastPollCompletedAt = new Date().toISOString();
+            agreementsImapScratch.lastPollResult = result;
+            return result;
+          }
+        : undefined,
+    agreementsImapSnapshot:
+      agreementsEnabled && agreementsStore
+        ? () => ({
+            watcherEnabled: true,
+            pollIntervalMs: imapPollIntervalMs,
+            lastPollCompletedAt: agreementsImapScratch.lastPollCompletedAt,
+            lastPollResult: agreementsImapScratch.lastPollResult,
+          })
+        : undefined,
   });
 
   if (agreementsEnabled && agreementsStore) {
@@ -414,15 +491,13 @@ if (isMainModule) {
     reconcileCronTask?.stop();
   });
 
-  const imapIntervalMs = Number(process.env.IMAP_POLL_INTERVAL_MS) || 5 * 60 * 1000;
-
   server.listen(port, () => {
     console.log(`MN Host Automator listening on http://localhost:${port}`);
     if (agreementsEnabled) {
       console.log(
-        `Agreements watcher: IMAP poller started (user=${imapUser}, interval=${imapIntervalMs}ms)`,
+        `Agreements watcher: IMAP poller started (user=${imapUser}, interval=${imapPollIntervalMs}ms)`,
       );
-      imapPoller?.start(imapIntervalMs);
+      imapPoller?.start(imapPollIntervalMs);
       if (reconcileCronTask && process.env.RECONCILE_COMMONS_CRON?.trim()) {
         console.log(`Reconciliation cron: ${process.env.RECONCILE_COMMONS_CRON!.trim()}`);
       }

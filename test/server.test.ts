@@ -6,6 +6,17 @@ import type { AddressInfo } from 'node:net';
 import type { Page } from 'puppeteer';
 import { createApp } from '../src/server.js';
 import { openAgreementsStore } from '../src/state/agreementsStore.js';
+import type { PollResult } from '../src/ingestion/imapPoller.js';
+
+const EMPTY_POLL_RESULT: PollResult = {
+  fetched: 0,
+  newAgreements: 0,
+  duplicates: 0,
+  addsQueued: 0,
+  dmsQueued: 0,
+  skipped: 0,
+  errors: 0,
+};
 
 function postJson(
   server: Server,
@@ -475,6 +486,99 @@ describe('createApp', () => {
       expect(res.body.members).toEqual([
         { memberId: '70001', fullName: 'Reconcile Tester', agreementCount: 1 },
       ]);
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // GET /status/agreements + POST /run/poll-agreements-mailbox (Stage 4d)
+  // -------------------------------------------------------------------------
+
+  it('returns 404 for agreements status endpoints when agreements store absent', async () => {
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const stat = await request(server).get('/status/agreements');
+      expect(stat.status).toBe(404);
+      const poll = await request(server).post('/run/poll-agreements-mailbox').send({});
+      expect(poll.status).toBe(404);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('GET /status/agreements returns DB overview & article config', async () => {
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 3 });
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+    });
+    await listen(server);
+    try {
+      store.recordAgreement({
+        memberId: '9',
+        fullName: 'Stats Person',
+        articleId: 'a1',
+        commentId: 'c1',
+        commentedAt: 1,
+        source: 'email',
+      });
+
+      const res = await request(server).get('/status/agreements');
+      expect(res.status).toBe(200);
+      expect(res.body.db.requiredAgreementCount).toBe(3);
+      expect(res.body.db.distinctMembersWithAgreement).toBe(1);
+      expect(res.body.db.totalAgreementRows).toBe(1);
+      expect(res.body.db.inProgressMemberCount).toBe(1);
+      expect(res.body.imap).toBeNull();
+      expect(Array.isArray(res.body.configuredAgreementArticles)).toBe(true);
+      expect(res.body.configuredAgreementArticles.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  it('POST /run/poll-agreements-mailbox 404 when hook not wired', async () => {
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+    });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/poll-agreements-mailbox').send({});
+      expect(res.status).toBe(404);
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  it('POST /run/poll-agreements-mailbox invokes optional poll hook', async () => {
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    const agreementsImapPollOnce = vi.fn().mockResolvedValue({ ...EMPTY_POLL_RESULT, fetched: 2 });
+
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+      agreementsImapPollOnce,
+    });
+
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/poll-agreements-mailbox').send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ ...EMPTY_POLL_RESULT, fetched: 2 });
+      expect(agreementsImapPollOnce).toHaveBeenCalledTimes(1);
     } finally {
       await closeServer(server);
       store.close();

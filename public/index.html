@@ -146,6 +146,55 @@
         color: var(--danger);
         margin-bottom: 0.35rem;
       }
+      .agreements-intro {
+        color: var(--muted);
+        font-size: 0.92rem;
+        margin: 0 0 0.85rem;
+        line-height: 1.42;
+      }
+      .agreements-dashboard {
+        font-size: 0.88rem;
+      }
+      .agreements-dashboard h3 {
+        margin: 0.85rem 0 0.35rem;
+        font-size: 0.98rem;
+        font-weight: 600;
+      }
+      .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+        gap: 0.35rem 0.75rem;
+        margin: 0.25rem 0 0.5rem;
+      }
+      .stat-grid dt {
+        margin: 0;
+        color: var(--muted);
+        font-weight: normal;
+      }
+      .stat-grid dd {
+        margin: 0 0 0.35rem;
+        font-family: ui-monospace, monospace;
+      }
+      .agreements-dash-note {
+        color: var(--muted);
+        font-size: 0.82rem;
+        margin-top: 0.35rem;
+      }
+      .agreements-dash-list {
+        margin: 0.25rem 0 0;
+        padding-left: 1.1rem;
+        max-height: 10rem;
+        overflow-y: auto;
+      }
+      .imap-pre {
+        margin: 0.35rem 0 0;
+        padding: 0.45rem;
+        border-radius: 4px;
+        background: #0a0b0e;
+        border: 1px solid var(--border);
+        overflow-x: auto;
+        white-space: pre-wrap;
+      }
     </style>
   </head>
   <body>
@@ -171,7 +220,6 @@
         <option>8. Miscellaneous</option>
         <option>Creative Center</option>
         <option>Marketplace</option>
-        <option>Playground</option>
       </select>
 
       <div class="row">
@@ -209,14 +257,21 @@
     </section>
 
     <section>
-      <h2 style="margin-top: 0; font-size: 1.1rem">Reconcile commons membership</h2>
-      <p style="margin: 0 0 0.65rem; color: var(--muted); font-size: 0.9rem">
-        Stage 4c: enqueue a background job for each member who has met the agreements threshold in SQLite, so they
-        are (re-)added to all configured spaces. Work runs in the same queue as agreement-email auto-adds. This
-        server must have the EC admin agreements store enabled; otherwise the request returns HTTP 404.
+      <h2 style="margin-top: 0; font-size: 1.1rem">Agreements &amp; commons membership</h2>
+
+      <p class="agreements-intro">
+        When the Stage 4a–4c agreements stack runs on this server you get SQLite-backed agreement counts plus an optional
+        IMAP inbox watcher. Refresh loads read-only totals; Poll runs one IMAP inbox round-trip (manual catch-up besides
+        the timer); Enqueue reconcile schedules background add-to-all-spaces repairs for eligible members — same Puppeteer queue
+        as agreement emails — without blocking this page.
       </p>
-      <div class="actions">
-        <button type="button" class="primary" id="btn-reconcile-membership">Enqueue reconcile</button>
+
+      <div id="agreements-dashboard" class="agreements-dashboard" aria-live="polite">Loading agreements status…</div>
+
+      <div class="actions" id="actions-agreements">
+        <button type="button" class="primary" id="btn-agreements-refresh">Refresh status</button>
+        <button type="button" class="primary" id="btn-agreements-poll">Poll inbox now</button>
+        <button type="button" id="btn-reconcile-membership">Enqueue reconcile</button>
       </div>
     </section>
 
@@ -235,6 +290,8 @@
         const btnAddAll = document.getElementById('btn-add-all');
         const btnAbortRemove = document.getElementById('btn-abort-remove');
         const btnAbortAdd = document.getElementById('btn-abort-add');
+        const btnAgreementsRefresh = document.getElementById('btn-agreements-refresh');
+        const btnAgreementsPoll = document.getElementById('btn-agreements-poll');
         const btnReconcileMembership = document.getElementById('btn-reconcile-membership');
         const btnClear = document.getElementById('btn-clear-log');
         const spaceSelect = document.getElementById('space-select');
@@ -246,6 +303,7 @@
         const wsDisconnect = document.getElementById('ws-disconnect');
         const addMemberName = document.getElementById('add-member-name');
         const addMemberId = document.getElementById('add-member-id');
+        const agreementsDashboard = document.getElementById('agreements-dashboard');
 
         let ws = null;
         let reconnectTimer = null;
@@ -256,6 +314,8 @@
          * 'add', or null when idle.
          */
         let runningSection = null;
+        /** True after /status/agreements loads IMAP watcher flags (production). */
+        let agreementsImapPollAvailable = false;
 
         /**
          * While a task is running, every non-Abort action button is hidden
@@ -277,6 +337,309 @@
            * the UI doesn't leave an empty strip where its buttons were. */
           actionsRemove.hidden = running && section !== 'remove';
           actionsAdd.hidden = running && section !== 'add';
+          renderPollButtonFromImapFlag();
+        }
+
+        function renderPollButtonFromImapFlag() {
+          btnAgreementsPoll.disabled =
+            Boolean(runningSection !== null) || !agreementsImapPollAvailable;
+        }
+
+        /** Build inner HTML string (everything escaped manually). */
+        function agreementsDashboardMarkup(data) {
+          const d = data.db || {};
+          const articles = Array.isArray(data.configuredAgreementArticles)
+            ? data.configuredAgreementArticles
+            : [];
+          const eligRows = Array.isArray(d.eligibleMembers) ? d.eligibleMembers : [];
+          const progRows = Array.isArray(d.inProgressMembers) ? d.inProgressMembers : [];
+          const eligTrunc =
+            typeof d.eligibleCount === 'number' && d.eligibleCount > eligRows.length;
+          const progTrunc =
+            typeof d.inProgressMemberCount === 'number' &&
+            d.inProgressMemberCount > progRows.length;
+
+          let imapHtml = '';
+
+          const imap = data.imap;
+          if (imap && typeof imap === 'object' && imap.watcherEnabled) {
+            let lastPoll = '';
+            if (
+              imap.lastPollCompletedAt ||
+              (imap.lastPollResult !== null && imap.lastPollResult !== undefined)
+            ) {
+              lastPoll +=
+                '<p><strong>Last manual poll:</strong> ' +
+                escapeHtml(String(imap.lastPollCompletedAt || '—'));
+              lastPoll +=
+                '</p>' +
+                (imap.lastPollResult
+                  ? '<pre class="imap-pre">' +
+                    escapeHtml(JSON.stringify(imap.lastPollResult, null, 2)) +
+                    '</pre>'
+                  : '');
+            } else lastPoll += '<p class="agreements-dash-note">No manual poll logged yet.</p>';
+
+            imapHtml =
+              '<h3>IMAP watcher</h3>' +
+              '<p>Interval <code>' +
+              escapeHtml(String(imap.pollIntervalMs)) +
+              ' ms</code> — timer runs beside this page.' +
+              lastPoll +
+              '</p>';
+          } else if (imap && typeof imap === 'object' && imap.watcherEnabled === false) {
+            imapHtml =
+              '<h3>IMAP watcher</h3><p class="agreements-dash-note">Watcher flagged off (unexpected).</p>';
+          } else {
+            imapHtml =
+              '<h3>IMAP watcher</h3><p class="agreements-dash-note">Not wired for this HTTP process — manual inbox poll unavailable (common in developer tests).</p>';
+          }
+
+          let cfgList = '';
+
+          articles.forEach(function (a) {
+            const link =
+              typeof a.url === 'string' && /^https:/.test(a.url)
+                ? ' — <a href="' + escapeHtml(a.url) + '" target="_blank" rel="noopener">article</a>'
+                : '';
+
+            cfgList +=
+              '<li>' +
+              escapeHtml(String(a.title ?? 'Untitled')) +
+              ' (<code>' +
+              escapeHtml(String(a.articleId)) +
+              '</code>)' +
+              link +
+              '</li>';
+          });
+
+          if (!cfgList) cfgList = '<li class="agreements-dash-note">(none configured)</li>';
+
+          function memberRows(rows, templ) {
+
+            let li = '';
+
+            if (rows.length === 0) li += '<li class="agreements-dash-note">(none)</li>';
+            else
+              rows.forEach(function (row) {
+                li += templ(row);
+
+
+              });
+
+
+            return li;
+
+
+          }
+
+          let eligUl =
+            '<ul class="agreements-dash-list">' +
+            memberRows(eligRows, function (row) {
+              return (
+                '<li>' +
+                escapeHtml(String(row.fullName)) +
+                ' <span style="opacity:0.8">• id ' +
+                escapeHtml(String(row.memberId)) +
+                ' • ' +
+                escapeHtml(String(row.agreementCount)) +
+                '/' +
+                escapeHtml(String(d.requiredAgreementCount ?? '?')) +
+                ' articles</span></li>'
+              );
+
+
+            }) +
+            '</ul>';
+
+          if (eligTrunc)
+            eligUl +=
+              '<p class="agreements-dash-note">Showing ' +
+              eligRows.length +
+              ' rows — eligible total is ' +
+              escapeHtml(String(d.eligibleCount)) +
+              '.</p>';
+
+          let progUl =
+            '<ul class="agreements-dash-list">' +
+            memberRows(progRows, function (row) {
+              return (
+                '<li>' +
+                escapeHtml(String(row.fullName)) +
+                ' <span style="opacity:0.8">• id ' +
+                escapeHtml(String(row.memberId)) +
+                ' • ' +
+                escapeHtml(String(row.distinctAgreementArticles)) +
+                '/' +
+                escapeHtml(String(d.requiredAgreementCount ?? '?')) +
+                ' articles</span></li>'
+              );
+
+
+            }) +
+            '</ul>';
+
+          if (progTrunc)
+            progUl +=
+              '<p class="agreements-dash-note">Showing ' +
+              progRows.length +
+              ' rows — in-progress member total is ' +
+              escapeHtml(String(d.inProgressMemberCount)) +
+              '.</p>';
+
+          return (
+            '<h3>Agreement database</h3>' +
+            '<dl class="stat-grid">' +
+            '<dt>Required distinct articles</dt><dd>' +
+            escapeHtml(String(d.requiredAgreementCount ?? '—')) +
+            '</dd>' +
+            '<dt>Distinct members with recordings</dt><dd>' +
+            escapeHtml(String(d.distinctMembersWithAgreement ?? 0)) +
+            '</dd>' +
+            '<dt>Stored agreement rows</dt><dd>' +
+            escapeHtml(String(d.totalAgreementRows ?? 0)) +
+            '</dd>' +
+            '<dt>Processed email ids (dedup ledger)</dt><dd>' +
+            escapeHtml(String(d.processedEmailCount ?? 0)) +
+            '</dd>' +
+            '<dt>Members flagged commons-added</dt><dd>' +
+            escapeHtml(String(d.commonsAddedMemberCount ?? 0)) +
+            '</dd>' +
+            '<dt>Eligible members (distinct articles ≥ threshold)</dt><dd>' +
+            escapeHtml(String(d.eligibleCount ?? 0)) +
+            '</dd>' +
+            '<dt>In progress (started, below threshold)</dt><dd>' +
+            escapeHtml(String(d.inProgressMemberCount ?? 0)) +
+            '</dd>' +
+            '</dl>' +
+            '<p class="agreements-dash-note">Snapshot time (browser): <code>' +
+            escapeHtml(new Date().toISOString()) +
+            '</code></p>' +
+            '<h3>Configured agreement gate posts</h3>' +
+            '<ul class="agreements-dash-list">' +
+            cfgList +
+            '</ul>' +
+            imapHtml +
+            '<h3>Eligible for commons repair</h3>' +
+            eligUl +
+            '<h3>In progress toward threshold</h3>' +
+            progUl
+
+
+          );
+
+
+        }
+
+
+
+        async function refreshAgreementsStatus(opts) {
+
+
+          opts = opts || {};
+
+
+          if (!opts.quiet) {
+
+
+            agreementsDashboard.textContent = 'Loading agreements status…';
+
+
+          }
+
+
+
+          try {
+
+
+            var res = await fetch('/status/agreements');
+
+
+            if (res.status === 404) {
+
+
+              agreementsImapPollAvailable = false;
+
+
+              renderPollButtonFromImapFlag();
+
+
+              agreementsDashboard.innerHTML =
+                '<p><strong>Agreements database unavailable.</strong> This server instance did not enable the SQLite EC admin store (Stage 4a inbox env).</p>';
+
+
+              return;
+
+
+            }
+
+
+            if (!res.ok) {
+
+
+              agreementsImapPollAvailable = false;
+
+
+              renderPollButtonFromImapFlag();
+
+
+              var fb = await res.text().catch(function () {
+
+
+                return '';
+
+
+              });
+
+
+              agreementsDashboard.innerHTML =
+                '<p><strong>HTTP ' +
+                res.status +
+                '</strong></p><pre class="imap-pre">' +
+                escapeHtml(fb) +
+                '</pre>';
+
+
+              return;
+
+
+            }
+
+
+
+            var data = await res.json();
+
+
+            agreementsImapPollAvailable =
+              typeof data.imap === 'object' &&
+              data.imap !== null &&
+              data.imap.watcherEnabled === true;
+
+
+            agreementsDashboard.innerHTML = agreementsDashboardMarkup(data);
+
+
+            renderPollButtonFromImapFlag();
+
+
+          } catch (e) {
+
+
+            agreementsImapPollAvailable = false;
+
+
+            renderPollButtonFromImapFlag();
+
+
+            agreementsDashboard.innerHTML =
+              '<p class="result-box error">Unable to load agreements dashboard: ' +
+              escapeHtml(e && e.message ? e.message : String(e)) +
+              '</p>';
+
+
+          }
+
+
         }
 
         function appendLog(message) {
@@ -436,6 +799,46 @@
           });
         });
 
+        btnAgreementsRefresh.addEventListener('click', function () {
+          void refreshAgreementsStatus({ quiet: false });
+        });
+
+        btnAgreementsPoll.addEventListener('click', async function () {
+          if (!agreementsImapPollAvailable) return;
+          appendLog('[imap] POST /run/poll-agreements-mailbox …');
+          btnAgreementsPoll.disabled = true;
+          try {
+            const res = await fetch('/run/poll-agreements-mailbox', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: '{}',
+            });
+            const body = await res.json().catch(function () {
+              return {};
+            });
+            if (res.status === 404) {
+              appendLog('[imap] Poll endpoint unavailable (404).');
+              agreementsImapPollAvailable = false;
+              return;
+            }
+            if (!res.ok) {
+              appendLog('[imap] ERROR: ' + (body.error || res.statusText || String(res.status)));
+              return;
+            }
+            appendLog(
+              '[imap] Poll OK — fetched ' +
+                (body.fetched != null ? body.fetched : '?') +
+                ', new agreements ' +
+                (body.newAgreements != null ? body.newAgreements : '?'),
+            );
+            await refreshAgreementsStatus({ quiet: true });
+          } catch (e) {
+            appendLog('[imap] ERROR: ' + (e && e.message ? e.message : String(e)));
+          } finally {
+            renderPollButtonFromImapFlag();
+          }
+        });
+
         btnReconcileMembership.addEventListener('click', async function () {
           if (
             !confirm(
@@ -481,12 +884,14 @@
                 '</pre>',
               false,
             );
+            void refreshAgreementsStatus({ quiet: true });
           } catch (e) {
             appendLog('ERROR: ' + (e && e.message ? e.message : String(e)));
           }
         });
 
         connectWs();
+        void refreshAgreementsStatus({ quiet: false });
       })();
     </script>
   </body>

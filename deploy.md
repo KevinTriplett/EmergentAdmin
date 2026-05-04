@@ -284,8 +284,10 @@ automatic adds — not a second browser runner.
 
 - **`RECONCILE_COMMONS_CRON`** — optional standard [node-cron](https://www.npmjs.com/package/node-cron) expression (trimmed env value). Example for 02:30 daily in the server's local timezone: `30 2 * * *`. Scheduled only when the agreements SQLite store opens successfully (same conditions as Stage 4a watcher data + app config).
 - **`IMAP_POLL_INTERVAL_MS`** — optional millisecond gap between inbox polls when the agreements watcher runs (default `300000`).
-- **`POST /run/reconcile-commons-membership`** — same semantics as `/run/remove-space-members`; responds with JSON `{ enqueued, members }`. Use **`curl`/CI**, or the **Enqueue reconcile** control in **`public/index.html`** when the agreements store is enabled.
+- **`POST /run/reconcile-commons-membership`** — same semantics as `/run/remove-space-members`; responds with JSON `{ enqueued, members }`. Use **`curl`/CI**, or the **`Enqueue reconcile`** control in **`public/index.html`** when the agreements store is enabled.
 
+- **`GET /status/agreements`** — read-only `{ db, imap, configuredAgreementArticles }` blob for dashboards (authored primarily for **`public/index.html`**). Omit when SQLite is off (`404`).
+- **`POST /run/poll-agreements-mailbox`** — invokes one IMAP ingestion round-trip (same semantics as timer ticks); returns **`PollResult` JSON**. Returns **`404`** if the watcher hook is absent (manual Node tests / dev stubs).
 Restart the unit after editing `.env` so cron registration picks up schedule changes.
 
 ## 5.3 Verifying the Agreements Watcher

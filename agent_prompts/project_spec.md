@@ -64,12 +64,14 @@ SQLite-backed **eligible member** list drives repair: anyone at or above
 `REQUIRED_AGREEMENT_COUNT` gets one background `add-to-all-spaces` job via the
 same `TaskScheduler` as IMAP. Optional `RECONCILE_COMMONS_CRON`; manual
 `POST /run/reconcile-commons-membership`. Idempotent on already-added spaces.
+`public/index.html` exposes **Enqueue reconcile** (calls the same POST; 404 hint if the agreements store is off).
 
 *(Stage 4b DM moderation deliberately skipped.)*
 
-### Stage 4d: Admin UI -- PENDING
-Agreements status section in `index.html` + status/poll-now hooks (reuse
-`/run/reconcile-commons-membership`).
+### Stage 4d: Admin UI -- PARTIAL
+
+- **DONE:** Commons membership reconcile from the admin UI (`Enqueue reconcile`).
+- **PENDING:** Agreements status overview, poll-status / richer agreements UX.
 
 ### Stage 4e: Change of heart -- PENDING
 Detect edits/deletes/new-disagreements during reconciliation; DM the

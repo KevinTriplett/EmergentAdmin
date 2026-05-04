@@ -53,6 +53,8 @@ const SEARCH_DEBOUNCE_MS = 1500;
 const ANIMATION_SETTLE_MS = 400;
 /** Per-keystroke delay used with `page.keyboard.type` to stay well under MN's input-handling rate. */
 const KEYSTROKE_DELAY_MS = 30;
+/** Slower per-key delay for the space Autocomplete prefix so filtering keeps up (burst typing looks like one-shot to MUI). */
+const AUTOCOMPLETE_PREFIX_KEY_DELAY_MS = 100;
 
 // === TEXT FRAGMENTS ===
 const TOAST_FRAGMENT = 'will be added';
@@ -154,13 +156,21 @@ async function domClick(page: Page, selector: string, label: string): Promise<vo
  *      triggers no diff. `page.keyboard.type` produces native InputEvents that
  *      go through React's event system normally.
  */
-async function keyboardType(page: Page, selector: string, value: string, label: string): Promise<void> {
+async function keyboardType(
+  page: Page,
+  selector: string,
+  value: string,
+  label: string,
+  keyDelayMs: number = KEYSTROKE_DELAY_MS,
+): Promise<void> {
   try {
     await page.focus(selector);
   } catch {
     throw new Error(`${label}: input not focusable (${selector})`);
   }
-  await page.keyboard.type(value, { delay: KEYSTROKE_DELAY_MS });
+  if (value.length > 0) {
+    await page.keyboard.type(value, { delay: keyDelayMs });
+  }
 }
 
 async function disposeHandle(
@@ -282,7 +292,51 @@ async function pickSpaceInDialog(
 ): Promise<void> {
   await log(msg.typingSpaceName(fullSpaceName));
   await sleep(ANIMATION_SETTLE_MS);
-  await keyboardType(page, SEL_SPACE_LIST_INPUT, fullSpaceName, 'Space list input');
+
+  /* MUI Autocomplete: typing the full string in one burst (or waiting only on the
+   * input value) can leave the popper filtered on the first keystroke while the field
+   * shows the whole query. Type the prefix with a slower key delay, wait until the
+   * options list actually shows a matching row (not Loading…), type the last
+   * character, then wait again for the full name (below). */
+  const prefix = fullSpaceName.slice(0, -1);
+  const lastChar = fullSpaceName.slice(-1);
+  await keyboardType(
+    page,
+    SEL_SPACE_LIST_INPUT,
+    prefix,
+    'Space list input (prefix)',
+    AUTOCOMPLETE_PREFIX_KEY_DELAY_MS,
+  );
+  if (prefix.trim() !== '') {
+    try {
+      await page.waitForFunction(
+        (listSel: string, needleRaw: string) => {
+          const needle = needleRaw.trim().toLowerCase();
+          if (!needle) return true;
+          const items = Array.from(document.querySelectorAll(listSel));
+          return items.some((li) => {
+            const el = li as HTMLElement;
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return false;
+            const t = (li.textContent || '').trim().toLowerCase();
+            if (t === '' || t.startsWith('loading')) return false;
+            return t.includes(needle);
+          });
+        },
+        { timeout: WAIT_POPPER_MS },
+        SEL_SPACE_LIST_OPTIONS,
+        prefix,
+      );
+    } catch {
+      if (logLevel === 'debug') {
+        await logSnapshot(page, SEL_SPACE_LIST_OPTIONS, log, 'pickSpaceInDialog-prefix-options-not-ready');
+      }
+      throw new Error(
+        `Space options list did not show a row matching prefix within ${WAIT_POPPER_MS}ms (prefix="${prefix}")`,
+      );
+    }
+  }
+  await page.keyboard.type(lastChar, { delay: KEYSTROKE_DELAY_MS });
 
   /* Wait until the popper contains a li whose visible text matches fullSpaceName.
    * This is a stricter postcondition than "any li exists" — it rules out MUI's

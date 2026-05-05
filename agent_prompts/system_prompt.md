@@ -131,6 +131,7 @@ For every task, follow this sequence:
 - Never use `any` types (in TypeScript) or equivalent escape hatches to avoid dealing with type constraints, unless isolated and justified.
 - Never commit code with known failing tests.
 - Never treat test code as second-class. Test code is production code. It gets the same quality standards.
+- Never relabel a redesign as a diagnostic.
 
 ## 7. Don't Repeat Yourself (DRY)
 
@@ -202,6 +203,37 @@ Rules:
 6. **Behavioral integrity over visible activity.**
    - Prefer one correct question over one speculative patch.
    - Do not prioritize showing progress over correctness.
+
+## 10. User-Stated Process Is Binding (Diagnose Inside It)
+
+When the user describes a multi-step workflow ("the process is: do A, then B, then C, because…"), treat that description as the specification. A reported bug against such a process is a deviation *from* the spec, not an invitation to redesign it.
+
+Rules:
+
+1. **Diagnose inside the stated process, not against it.**
+   - The only valid hypothesis shape is: "Within steps A→B→C, why is step N failing?"
+   - "Maybe the process should be different" is a separate conversation and requires explicit user approval before it influences code or diagnostics.
+
+2. **Historical context is a constraint, not a starting point.**
+   - When the user says "we already tried X and it failed because Y", treat X as eliminated. Do not re-propose X, including in softened forms ("what if we tried X but slower / smaller / with a flag…").
+   - If you don't understand why X failed, ask. Do not re-derive it.
+
+3. **Diagnostics must be read-only.**
+   - Acceptable: DOM probes, value reads, structured logging, screenshots, snapshots.
+   - Not acceptable under the label "diagnostic": changing timing constants, changing the order of operations, changing matching/predicate logic, adding fallbacks, "just trying" a different selector.
+   - Anything that alters how the stated process executes is a redesign and requires explicit approval.
+
+4. **If you think the design is wrong, say so out loud — don't smuggle.**
+   - State the disagreement plainly: "Your stated process is A→B→C. I think B is wrong because Z. May I propose B'?"
+   - Do not silently merge your preferred design into a "fix".
+
+5. **Confidence floor for design pushback: high and named.**
+   - Do not push back on a stated process based on intuition or generic best practices.
+   - Pushback requires a specific, falsifiable reason (a documented API constraint violated, a contradiction with another stated requirement, a concrete test that would fail). Otherwise, accept the process and diagnose within it.
+
+6. **Discriminating-question shape.**
+   - Right: "Inside your process, what does the popper actually contain right after the prefix is typed?"
+   - Wrong: "Should we maybe type the whole string at once and wait differently?"
 
 ### Puppeteer UI Failure Checklist (Ask Before Edit)
 

@@ -55,6 +55,7 @@
       label,
       .row {
         display: block;
+        margin-top: 0.65rem;
         margin-bottom: 0.65rem;
       }
       select {
@@ -65,6 +66,9 @@
         border: 1px solid var(--border);
         background: #0e1014;
         color: var(--fg);
+      }
+      section > label:first-child {
+        margin-top: 0;
       }
       .actions {
         display: flex;
@@ -195,6 +199,75 @@
         overflow-x: auto;
         white-space: pre-wrap;
       }
+      .global-controls {
+        max-width: 52rem;
+        margin: 0 0 0.65rem;
+      }
+      .global-controls label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        margin-bottom: 0;
+      }
+      .tabs {
+        display: flex;
+        gap: 0.25rem;
+        flex-wrap: wrap;
+        max-width: 52rem;
+        border-bottom: 1px solid var(--border);
+        margin: 0;
+        padding: 0;
+      }
+      .tab {
+        background: transparent;
+        border: 1px solid transparent;
+        border-bottom: none;
+        border-radius: 6px 6px 0 0;
+        padding: 0.55rem 0.95rem;
+        color: var(--muted);
+        font: inherit;
+        font-size: 0.95rem;
+        cursor: pointer;
+        margin-bottom: -1px;
+      }
+      .tab:hover {
+        color: var(--fg);
+      }
+      .tab[aria-selected='true'] {
+        background: var(--panel);
+        border-color: var(--border);
+        color: var(--fg);
+      }
+      .tab:focus-visible {
+        outline: 2px solid #4b5563;
+        outline-offset: -2px;
+      }
+      section.tabpanel {
+        margin-top: 0;
+        border-top-left-radius: 0;
+      }
+      .tab-running-dot {
+        display: none;
+        width: 0.55rem;
+        height: 0.55rem;
+        border-radius: 50%;
+        background: var(--ok);
+        margin-left: 0.4rem;
+        vertical-align: 0.05em;
+      }
+      .tab-running-dot.is-running {
+        display: inline-block;
+        animation: tab-pulse 1.4s ease-in-out infinite;
+      }
+      @keyframes tab-pulse {
+        0%,
+        100% {
+          opacity: 0.45;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
     </style>
   </head>
   <body>
@@ -203,12 +276,20 @@
       <p class="subtitle">Mighty Networks Space Management</p>
     </header>
 
-    <section>
-      <h2 style="margin-top: 0; font-size: 1.1rem">Remove Space Members</h2>
+    <div id="ws-disconnect" class="ws-status" hidden>Disconnected</div>
 
-      <div id="ws-disconnect" class="ws-status" hidden>Disconnected</div>
+    <div class="global-controls">
+      <label><input type="checkbox" id="chk-headless" checked /> Headless mode</label>
+    </div>
 
-      <label for="space-select">Space</label>
+    <div class="tabs" role="tablist" aria-label="MN Host Automator sections">
+      <button id="tab-add" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-add" tabindex="-1">Add Commons Members<span class="tab-running-dot" data-tab-running></span></button>
+      <button id="tab-remove" type="button" class="tab" role="tab" aria-selected="true" aria-controls="panel-remove" tabindex="0">Remove Commons Members<span class="tab-running-dot" data-tab-running></span></button>
+      <button id="tab-agreements" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-agreements" tabindex="-1">Agreements Dashboard</button>
+    </div>
+
+    <section id="panel-remove" class="tabpanel" role="tabpanel" aria-labelledby="tab-remove" tabindex="0">
+      <label for="space-select">Commons Space Name</label>
       <select id="space-select">
         <option>1. Relating to SELF</option>
         <option>2. Relating to OTHERS</option>
@@ -223,9 +304,6 @@
       </select>
 
       <div class="row">
-        <label><input type="checkbox" id="chk-headless" checked /> Headless mode</label>
-      </div>
-      <div class="row">
         <label
           ><input type="checkbox" id="chk-dry" checked /> Dry run
           <span id="dry-hint" class="dry-hint">(no members will be removed)</span></label
@@ -239,9 +317,7 @@
       </div>
     </section>
 
-    <section>
-      <h2 style="margin-top: 0; font-size: 1.1rem">Add Member to All Spaces</h2>
-
+    <section id="panel-add" class="tabpanel" role="tabpanel" aria-labelledby="tab-add" tabindex="0" hidden>
       <label for="add-member-name">Full Member Name</label>
       <input type="text" id="add-member-name" placeholder="e.g. Jane Doe" autocomplete="off" />
 
@@ -256,9 +332,7 @@
       </div>
     </section>
 
-    <section>
-      <h2 style="margin-top: 0; font-size: 1.1rem">Agreements &amp; commons membership</h2>
-
+    <section id="panel-agreements" class="tabpanel" role="tabpanel" aria-labelledby="tab-agreements" tabindex="0" hidden>
       <p class="agreements-intro">
         When the Stage 4a–4c agreements stack runs on this server you get SQLite-backed agreement counts plus an optional
         IMAP inbox watcher. Refresh loads read-only totals; Poll runs one IMAP inbox round-trip (manual catch-up besides
@@ -342,7 +416,18 @@
            * the UI doesn't leave an empty strip where its buttons were. */
           actionsRemove.hidden = running && section !== 'remove';
           actionsAdd.hidden = running && section !== 'add';
+          syncTabRunningDots(section);
           syncAgreementsSectionControls();
+        }
+
+        /* Pulse a small dot on the running tab's label so the abort button
+         * is discoverable even if the user navigates away from the running
+         * tab. Agreements has no long-running task and therefore no dot. */
+        function syncTabRunningDots(section) {
+          const dotRemove = document.querySelector('#tab-remove [data-tab-running]');
+          const dotAdd = document.querySelector('#tab-add [data-tab-running]');
+          if (dotRemove) dotRemove.classList.toggle('is-running', section === 'remove');
+          if (dotAdd) dotAdd.classList.toggle('is-running', section === 'add');
         }
 
         function syncAgreementsSectionControls() {
@@ -923,6 +1008,45 @@
             appendLog('ERROR: ' + (e && e.message ? e.message : String(e)));
           }
         });
+
+        function activateTab(tabEl) {
+          const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+          tabs.forEach(function (t) {
+            const isActive = t === tabEl;
+            t.setAttribute('aria-selected', isActive ? 'true' : 'false');
+            t.tabIndex = isActive ? 0 : -1;
+            const panel = document.getElementById(t.getAttribute('aria-controls'));
+            if (panel) panel.hidden = !isActive;
+          });
+        }
+
+        const tabList = document.querySelector('[role="tablist"]');
+        if (tabList) {
+          tabList.addEventListener('click', function (ev) {
+            const t = ev.target.closest('[role="tab"]');
+            if (t && tabList.contains(t)) {
+              activateTab(t);
+              t.focus({ preventScroll: true });
+            }
+          });
+          /* WAI-ARIA tabs pattern: arrow keys move focus + selection; Home/End
+           * jump to first/last. Vertical arrows are intentionally ignored —
+           * this is a horizontal tablist. */
+          tabList.addEventListener('keydown', function (ev) {
+            const tabs = Array.from(tabList.querySelectorAll('[role="tab"]'));
+            const currentIdx = tabs.indexOf(document.activeElement);
+            if (currentIdx === -1) return;
+            let nextIdx = currentIdx;
+            if (ev.key === 'ArrowRight') nextIdx = (currentIdx + 1) % tabs.length;
+            else if (ev.key === 'ArrowLeft') nextIdx = (currentIdx - 1 + tabs.length) % tabs.length;
+            else if (ev.key === 'Home') nextIdx = 0;
+            else if (ev.key === 'End') nextIdx = tabs.length - 1;
+            else return;
+            ev.preventDefault();
+            activateTab(tabs[nextIdx]);
+            tabs[nextIdx].focus({ preventScroll: true });
+          });
+        }
 
         connectWs();
         syncAgreementsSectionControls();

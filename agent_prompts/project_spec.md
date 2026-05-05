@@ -58,6 +58,8 @@ Poller already calls `enqueueMalformedDm` when wired. Need:
 `src/tasks/dmMember.ts` using the `chats/new?user_id=` shortcut URL,
 `dms_sent` dedup table (schema already in place), rate-limit.
 
+*(Stage 4b DM moderation deliberately skipped.)*
+
 ### Stage 4c: Reconciliation -- DONE
 
 SQLite-backed **eligible member** list drives repair: anyone at or above
@@ -66,8 +68,6 @@ same `TaskScheduler` as IMAP. Optional `RECONCILE_COMMONS_CRON`; manual
 `POST /run/reconcile-commons-membership`. Idempotent on already-added spaces.
 `public/index.html` exposes **Enqueue reconcile** (calls the same POST; 404 hint if the agreements store is off).
 
-*(Stage 4b DM moderation deliberately skipped.)*
-
 ### Stage 4d: Admin UI -- DONE
 
 - **`GET /status/agreements`** — JSON rollup: SQLite `AgreementsOverview` + configured `AGREEMENT_ARTICLES`
@@ -75,7 +75,8 @@ same `TaskScheduler` as IMAP. Optional `RECONCILE_COMMONS_CRON`; manual
 - **`POST /run/poll-agreements-mailbox`** — one-shot `ImapPoller.pollOnce` when the runtime wires the hook;
   responds with Stage 4a poll counters (`fetched`, `newAgreements`, …) or HTTP 404.
 - **`public/index.html`** unified **Agreements & commons membership** card: live dashboard (refresh on load /
-  Refresh), inbox poll button when IMAP telemetry is present, **Enqueue reconcile** (Stage 4c).
+  Refresh), inbox poll button when IMAP telemetry is present, **Copy status JSON** (last successful dashboard payload),
+  reconcile disabled when the agreements store is not mounted (**Enqueue reconcile** / Stage 4c).
 
 ### Stage 4e: Change of heart -- PENDING
 Detect edits/deletes/new-disagreements during reconciliation; DM the

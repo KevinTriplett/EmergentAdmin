@@ -271,6 +271,7 @@
       <div class="actions" id="actions-agreements">
         <button type="button" class="primary" id="btn-agreements-refresh">Refresh status</button>
         <button type="button" class="primary" id="btn-agreements-poll">Poll inbox now</button>
+        <button type="button" id="btn-agreements-copy-json">Copy status JSON</button>
         <button type="button" id="btn-reconcile-membership">Enqueue reconcile</button>
       </div>
     </section>
@@ -292,6 +293,7 @@
         const btnAbortAdd = document.getElementById('btn-abort-add');
         const btnAgreementsRefresh = document.getElementById('btn-agreements-refresh');
         const btnAgreementsPoll = document.getElementById('btn-agreements-poll');
+        const btnAgreementsCopyJson = document.getElementById('btn-agreements-copy-json');
         const btnReconcileMembership = document.getElementById('btn-reconcile-membership');
         const btnClear = document.getElementById('btn-clear-log');
         const spaceSelect = document.getElementById('space-select');
@@ -316,6 +318,10 @@
         let runningSection = null;
         /** True after /status/agreements loads IMAP watcher flags (production). */
         let agreementsImapPollAvailable = false;
+        /** False when the last refresh got 404 (agreements store not mounted on this process). */
+        let agreementsStoreAvailable = false;
+        /** Pretty-printed payload from the last successful GET /status/agreements (for clipboard). */
+        let lastAgreementsStatusJson = null;
 
         /**
          * While a task is running, every non-Abort action button is hidden
@@ -330,19 +336,20 @@
           btnRun.hidden = running;
           btnRunAll.hidden = running;
           btnAddAll.hidden = running;
-          btnReconcileMembership.disabled = running;
           btnAbortRemove.hidden = section !== 'remove';
           btnAbortAdd.hidden = section !== 'add';
           /* Collapse the non-initiating section's action row entirely so
            * the UI doesn't leave an empty strip where its buttons were. */
           actionsRemove.hidden = running && section !== 'remove';
           actionsAdd.hidden = running && section !== 'add';
-          renderPollButtonFromImapFlag();
+          syncAgreementsSectionControls();
         }
 
-        function renderPollButtonFromImapFlag() {
-          btnAgreementsPoll.disabled =
-            Boolean(runningSection !== null) || !agreementsImapPollAvailable;
+        function syncAgreementsSectionControls() {
+          const running = runningSection !== null;
+          btnAgreementsPoll.disabled = running || !agreementsImapPollAvailable;
+          btnReconcileMembership.disabled = running || !agreementsStoreAvailable;
+          btnAgreementsCopyJson.disabled = !lastAgreementsStatusJson;
         }
 
         /** Build inner HTML string (everything escaped manually). */
@@ -423,14 +430,8 @@
             else
               rows.forEach(function (row) {
                 li += templ(row);
-
-
               });
-
-
             return li;
-
-
           }
 
           let eligUl =
@@ -490,9 +491,6 @@
           return (
             '<h3>Agreement database</h3>' +
             '<dl class="stat-grid">' +
-            '<dt>Required distinct articles</dt><dd>' +
-            escapeHtml(String(d.requiredAgreementCount ?? '—')) +
-            '</dd>' +
             '<dt>Distinct members with recordings</dt><dd>' +
             escapeHtml(String(d.distinctMembersWithAgreement ?? 0)) +
             '</dd>' +
@@ -561,7 +559,13 @@
               agreementsImapPollAvailable = false;
 
 
-              renderPollButtonFromImapFlag();
+              agreementsStoreAvailable = false;
+
+
+              lastAgreementsStatusJson = null;
+
+
+              syncAgreementsSectionControls();
 
 
               agreementsDashboard.innerHTML =
@@ -580,7 +584,13 @@
               agreementsImapPollAvailable = false;
 
 
-              renderPollButtonFromImapFlag();
+              agreementsStoreAvailable = false;
+
+
+              lastAgreementsStatusJson = null;
+
+
+              syncAgreementsSectionControls();
 
 
               var fb = await res.text().catch(function () {
@@ -616,10 +626,16 @@
               data.imap.watcherEnabled === true;
 
 
+            agreementsStoreAvailable = true;
+
+
+            lastAgreementsStatusJson = JSON.stringify(data, null, 2);
+
+
             agreementsDashboard.innerHTML = agreementsDashboardMarkup(data);
 
 
-            renderPollButtonFromImapFlag();
+            syncAgreementsSectionControls();
 
 
           } catch (e) {
@@ -628,7 +644,13 @@
             agreementsImapPollAvailable = false;
 
 
-            renderPollButtonFromImapFlag();
+            agreementsStoreAvailable = false;
+
+
+            lastAgreementsStatusJson = null;
+
+
+            syncAgreementsSectionControls();
 
 
             agreementsDashboard.innerHTML =
@@ -835,7 +857,19 @@
           } catch (e) {
             appendLog('[imap] ERROR: ' + (e && e.message ? e.message : String(e)));
           } finally {
-            renderPollButtonFromImapFlag();
+            syncAgreementsSectionControls();
+          }
+        });
+
+        btnAgreementsCopyJson.addEventListener('click', async function () {
+          if (!lastAgreementsStatusJson) return;
+          try {
+            await navigator.clipboard.writeText(lastAgreementsStatusJson);
+            appendLog('[agreements] Copied GET /status/agreements JSON to clipboard.');
+          } catch (e) {
+            appendLog(
+              '[agreements] Clipboard failed: ' + (e && e.message ? e.message : String(e)),
+            );
           }
         });
 
@@ -891,6 +925,7 @@
         });
 
         connectWs();
+        syncAgreementsSectionControls();
         void refreshAgreementsStatus({ quiet: false });
       })();
     </script>

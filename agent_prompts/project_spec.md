@@ -82,13 +82,15 @@ same `TaskScheduler` as IMAP. Optional `RECONCILE_COMMONS_CRON`; manual
 Detect edits/deletes/new-disagreements during reconciliation; DM the
 member with a warning. Schema additions drafted in the plan.
 
-## TODO -- DONE
+## TODO
 - index.html after clicking an action button (Remove or Add) replace those action
 buttons with the Abort button -- DONE
 - email the log generated at the end of a run by removeSpaceMembers or addSpaceMember
 tasks in production to admin email addresses hard coded into an array, populated initially
 with kt@kevintriplett.com -- DONE (see `src/email.ts`; silently no-ops unless
 NODE_ENV=production AND all SMTP_* env vars are set; SMTP_* vars live in `.env.example`)
+- debug addSpaceMember error, usually on first and sometimes second space, ERROR: Member search:
+selector not found (.filter-bar-search-region div[aria-label='Search Members']) -- DONE
 
 ## Stack
 - Runtime: Node.js

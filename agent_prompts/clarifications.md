@@ -198,6 +198,35 @@ Process:
     1. if either the SEL_ACTIVE date is more than 90 days prior to today's date or SEL_JOINED is more than 1 year prior to today's date, break out of the loop and discard this member's data
 1. write the data to a csv file in the public directory on the server with header row "NAME, JOINED, LAST ACTIVE"
 
+### greetPotentialNewMembers
+
+Purpose: We receive requests to join and part of the new member journey is to be greeted by an existing member before being approved to join. Here's the process:
+
+Process:
+
+1. request to join
+    1. email received, request to join
+    1. retrieve the answers to the questions
+1. Send email 
+    1. if answer is yes to being greeted
+        1. ask for dates and times available for a greeting
+    1. else
+        1. ask if accept a greeting
+1. email reply received
+    1. post in the new member space
+        1. the answers to questions
+        1. the dates and times suggested
+1. a greeter comments
+1. greeter comments are emailed
+1. reply is posted as reply to greeter comment
+1. this can happen as many times as needed for clarification
+1. if greeter comments "I will greet"
+    1. "I will greet" is not emailed but any text after is emailed
+    1. event is posted
+    1. email is sent with .ics and nice standard text
+1. if greeting takes place
+    1. greeter posts a comment of their acceptance or rejection
+
 
 
 ## Return types

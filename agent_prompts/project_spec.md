@@ -151,6 +151,8 @@ a subset of comments, not all -- DONE (Stage 4e: audit job clicks
 - when reconciling, send email to admin iff one or more members comments do not match
 the agree regex -- DONE (Stage 4e always emails: "0 anomalies — all clear" or
 "N anomaly(ies): Alice (deleted), …" — Q4 directive to send the happy case too)
+- add retry to cron jobs on puppeteer flakiness, it seems to be happening alot. Maybe
+explore adding waits during browser events that might trigger this flakiness.
 
 ## Stack
 - Runtime: Node.js

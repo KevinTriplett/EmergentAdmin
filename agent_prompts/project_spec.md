@@ -68,6 +68,23 @@ same `TaskScheduler` as IMAP. Optional `RECONCILE_COMMONS_CRON`; manual
 `POST /run/reconcile-commons-membership`. Idempotent on already-added spaces.
 `public/index.html` exposes **Enqueue reconcile** (calls the same POST; 404 hint if the agreements store is off).
 
+**Stage 4f overlay (verified-added flag):**
+- `members.commons_added_at INTEGER NULL` — set by `addToAllSpacesJob`
+  itself when a run completes with `failureCount === 0` (every space
+  added cleanly OR was already-member). Independent of the
+  `members.added_at` dedup gate, which still guards the IMAP poller's
+  one-shot enqueue.
+- Reconcile scope env var `RECONCILE_COMMONS_SCOPE`. Default
+  (unset / any other value) = re-run for every eligible member;
+  catches drift via idempotent repair. Set to `not-yet-added` to
+  trim the queue to members whose `commons_added_at IS NULL` —
+  faster runs, but trusts the verified-added flag as ground truth.
+- Dashboard list **"Eligible, not yet added to Commons"** uses
+  `eligibleNotYetAddedMembers` from the overview; counter
+  **"Members verified added to all Commons spaces"** uses
+  `commonsAddedMemberCount` (now counting `commons_added_at IS NOT NULL`,
+  not the old dedup-gate semantic).
+
 ### Stage 4d: Admin UI -- DONE
 
 - **`GET /status/agreements`** — JSON rollup: SQLite `AgreementsOverview` + configured `AGREEMENT_ARTICLES`

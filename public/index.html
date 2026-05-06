@@ -283,9 +283,9 @@
     </div>
 
     <div class="tabs" role="tablist" aria-label="MN Host Automator sections">
-      <button id="tab-add" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-add" tabindex="-1">Add Commons Members<span class="tab-running-dot" data-tab-running></span></button>
-      <button id="tab-remove" type="button" class="tab" role="tab" aria-selected="true" aria-controls="panel-remove" tabindex="0">Remove Commons Members<span class="tab-running-dot" data-tab-running></span></button>
-      <button id="tab-agreements" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-agreements" tabindex="-1">Agreements Dashboard</button>
+      <button id="tab-add" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-add" tabindex="-1">Add<span class="tab-running-dot" data-tab-running></span></button>
+      <button id="tab-remove" type="button" class="tab" role="tab" aria-selected="true" aria-controls="panel-remove" tabindex="0">Remove<span class="tab-running-dot" data-tab-running></span></button>
+      <button id="tab-agreements" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-agreements" tabindex="-1">Agreements</button>
     </div>
 
     <section id="panel-remove" class="tabpanel" role="tabpanel" aria-labelledby="tab-remove" tabindex="0">
@@ -445,10 +445,24 @@
           const articles = Array.isArray(data.configuredAgreementArticles)
             ? data.configuredAgreementArticles
             : [];
-          const eligRows = Array.isArray(d.eligibleMembers) ? d.eligibleMembers : [];
+          /* Stage 4f: the operator-actionable list is the one filtered to
+           * "eligible AND commons_added_at IS NULL" (i.e. those who still
+           * need an add-to-all-spaces pass). The unfiltered eligibleMembers
+           * stays in the JSON payload for tooling but is no longer
+           * surfaced here. */
+          const eligRows = Array.isArray(d.eligibleNotYetAddedMembers)
+            ? d.eligibleNotYetAddedMembers
+            : Array.isArray(d.eligibleMembers) // graceful fallback for older servers
+              ? d.eligibleMembers
+              : [];
           const progRows = Array.isArray(d.inProgressMembers) ? d.inProgressMembers : [];
-          const eligTrunc =
-            typeof d.eligibleCount === 'number' && d.eligibleCount > eligRows.length;
+          const eligNotYetCount =
+            typeof d.eligibleNotYetAddedCount === 'number'
+              ? d.eligibleNotYetAddedCount
+              : typeof d.eligibleCount === 'number'
+                ? d.eligibleCount
+                : 0;
+          const eligTrunc = eligNotYetCount > eligRows.length;
           const progTrunc =
             typeof d.inProgressMemberCount === 'number' &&
             d.inProgressMemberCount > progRows.length;
@@ -544,8 +558,8 @@
             eligUl +=
               '<p class="agreements-dash-note">Showing ' +
               eligRows.length +
-              ' rows — eligible total is ' +
-              escapeHtml(String(d.eligibleCount)) +
+              ' rows — not-yet-added total is ' +
+              escapeHtml(String(eligNotYetCount)) +
               '.</p>';
 
           let progUl =
@@ -587,7 +601,7 @@
             '<dt>Processed email ids (dedup ledger)</dt><dd>' +
             escapeHtml(String(d.processedEmailCount ?? 0)) +
             '</dd>' +
-            '<dt>Members flagged commons-added</dt><dd>' +
+            '<dt>Members verified added to all Commons spaces</dt><dd>' +
             escapeHtml(String(d.commonsAddedMemberCount ?? 0)) +
             '</dd>' +
             '<dt>Eligible members (distinct articles ≥ threshold)</dt><dd>' +
@@ -605,7 +619,7 @@
             cfgList +
             '</ul>' +
             imapHtml +
-            '<h3>Eligible for commons repair</h3>' +
+            '<h3>Eligible, not yet added to Commons</h3>' +
             eligUl +
             '<h3>In progress toward threshold</h3>' +
             progUl

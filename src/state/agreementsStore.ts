@@ -77,10 +77,24 @@ export type AgreementsOverview = {
   distinctMembersWithAgreement: number;
   totalAgreementRows: number;
   eligibleCount: number;
+  /**
+   * Stage 4f: eligible members minus those already verified-added to
+   * every commons space. This is the list the operator wants to see
+   * under "Eligible, not yet added to Commons" — the actionable subset.
+   */
+  eligibleNotYetAddedCount: number;
   inProgressMemberCount: number;
+  /**
+   * Stage 4f flip: now counts `members.commons_added_at IS NOT NULL`
+   * (verified-added by addToAllSpacesJob on failureCount===0), NOT the
+   * legacy `added_at` dedup gate. The list and counter agree on what
+   * "added" means after this change.
+   */
   commonsAddedMemberCount: number;
   processedEmailCount: number;
   eligibleMembers: readonly EligibleCommonsMember[];
+  /** Stage 4f: same shape as eligibleMembers, filtered to flag-IS-NULL. */
+  eligibleNotYetAddedMembers: readonly EligibleCommonsMember[];
   inProgressMembers: readonly AgreementProgressMember[];
 };
 
@@ -104,9 +118,27 @@ export interface AgreementsStore {
   /**
    * Members whose recorded agreement rows meet or exceed `requiredAgreementCount`
    * (distinct `article_id` per member). Stage 4c uses this list to enqueue
-   * repair runs without scraping MN HTML.
+   * repair runs without scraping MN HTML. **Unfiltered** by `commons_added_at`
+   * — reconcile chooses scope at its own level (env var toggle).
    */
   listMembersEligibleForCommonsAdd(): readonly EligibleCommonsMember[];
+  /**
+   * Stage 4f: same shape as `listMembersEligibleForCommonsAdd` but filtered
+   * to members whose `commons_added_at` is still NULL. Drives the
+   * dashboard's "Eligible, not yet added to Commons" panel and (when
+   * the reconcile env-var toggle is on) the reconcile scope.
+   */
+  listMembersEligibleNotYetCommonsAdded(): readonly EligibleCommonsMember[];
+  /**
+   * Stage 4f: idempotently set `members.commons_added_at` for the given
+   * member. Called by `addToAllSpacesJob` when the run finishes with
+   * `failureCount === 0` (every space added cleanly OR was already-member).
+   * Silently no-ops on unknown members so manual / auto / reconcile
+   * callers can all wire it without pre-checking row existence.
+   */
+  markCommonsAdded(memberId: string, when?: number): void;
+  /** Stage 4f: read back whether the member has been verified-added. */
+  isCommonsAdded(memberId: string): boolean;
   getAgreementsOverview(opts?: GetAgreementsOverviewOpts): AgreementsOverview;
 
   // ---- Stage 4e: change-of-heart audit -------------------------------------
@@ -218,6 +250,13 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
   ensureColumn(db, 'agreements', 'audit_state', 'TEXT');
   ensureColumn(db, 'agreements', 'audit_at', 'INTEGER');
 
+  /* Stage 4f: verified-added flag. `members.added_at` was always a dedup gate
+   * (set BEFORE the add-job runs) — `commons_added_at` is the post-job
+   * confirmation that every commons space accepted the member. Set by
+   * `markCommonsAdded`, called from `addToAllSpacesJob` when failureCount
+   * reaches zero. */
+  ensureColumn(db, 'members', 'commons_added_at', 'INTEGER');
+
   const statements = {
     upsertMember: db.prepare<[string, string]>(
       `INSERT INTO members (member_id, full_name) VALUES (?, ?)
@@ -261,6 +300,16 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
     markAdded: db.prepare<[number, string]>(
       `UPDATE members SET added_at = ? WHERE member_id = ? AND added_at IS NULL`,
     ),
+    /* Stage 4f: idempotent set of commons_added_at. Same first-write-wins
+     * pattern as markAdded — once an add-job has verified the member is
+     * in every commons space, later re-runs (e.g. reconcile) don't bump
+     * the timestamp. */
+    markCommonsAdded: db.prepare<[number, string]>(
+      `UPDATE members SET commons_added_at = ? WHERE member_id = ? AND commons_added_at IS NULL`,
+    ),
+    selectMemberCommonsAdded: db.prepare<[string], { commons_added_at: number | null }>(
+      `SELECT commons_added_at FROM members WHERE member_id = ?`,
+    ),
     hasProcessedEmail: db.prepare<[string]>(
       `SELECT 1 FROM processed_emails WHERE message_id = ?`,
     ),
@@ -298,8 +347,34 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
     totalAgreementRowsCount: db.prepare<[], { n: number }>(
       `SELECT COUNT(*) AS n FROM agreements`,
     ),
+    /* Stage 4f flip: this counter now tracks `commons_added_at IS NOT NULL`
+     * (verified-added) instead of `added_at IS NOT NULL` (dedup gate).
+     * Operator-visible "Members flagged commons-added" matches the new
+     * "Eligible, not yet added to Commons" list semantics. */
     commonsAddedCount: db.prepare<[], { n: number }>(
-      `SELECT COUNT(*) AS n FROM members WHERE added_at IS NOT NULL`,
+      `SELECT COUNT(*) AS n FROM members WHERE commons_added_at IS NOT NULL`,
+    ),
+    /* Stage 4f filtered list: eligible AND not yet verified-added. Drives
+     * the dashboard's "Eligible, not yet added to Commons" panel. */
+    eligibleNotYetCommonsAddedLimited: db.prepare<[number, number], { member_id: string; full_name: string; agreement_count: number }>(
+      `SELECT m.member_id, m.full_name, COUNT(DISTINCT a.article_id) AS agreement_count
+       FROM members m
+       INNER JOIN agreements a ON a.member_id = m.member_id AND ${AGREEMENT_VALID_WHERE}
+       WHERE m.commons_added_at IS NULL
+       GROUP BY m.member_id, m.full_name
+       HAVING agreement_count >= ?
+       ORDER BY m.full_name COLLATE NOCASE ASC
+       LIMIT ?`,
+    ),
+    countEligibleNotYetCommonsAdded: db.prepare<[number], { n: number }>(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT m.member_id
+         FROM members m
+         INNER JOIN agreements a ON a.member_id = m.member_id AND ${AGREEMENT_VALID_WHERE}
+         WHERE m.commons_added_at IS NULL
+         GROUP BY m.member_id
+         HAVING COUNT(DISTINCT a.article_id) >= ?
+       ) t`,
     ),
     processedEmailsCountStmt: db.prepare<[], { n: number }>(
       `SELECT COUNT(*) AS n FROM processed_emails`,
@@ -421,6 +496,34 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
         agreementCount: r.agreement_count,
       }));
     },
+    listMembersEligibleNotYetCommonsAdded() {
+      /* Use the limited statement with a generous cap so the call site
+       * (UI dashboard / reconcile-with-toggle) gets the same shape as
+       * `listMembersEligibleForCommonsAdd`. We intentionally use the same
+       * 250-row default here as the overview's `maxListedMembers`; this
+       * is fine because the UI also asks the overview for the count, and
+       * reconcile only needs to enqueue jobs (queue capacity, not list
+       * fidelity, is the bottleneck there). */
+      const LARGE = 1_000_000;
+      const rows = statements.eligibleNotYetCommonsAddedLimited.all(
+        requiredAgreementCount,
+        LARGE,
+      );
+      return rows.map((r) => ({
+        memberId: r.member_id,
+        fullName: r.full_name,
+        agreementCount: r.agreement_count,
+      }));
+    },
+    markCommonsAdded(memberId, when = Date.now()) {
+      statements.markCommonsAdded.run(when, memberId);
+    },
+    isCommonsAdded(memberId) {
+      const row = statements.selectMemberCommonsAdded.get(memberId) as
+        | { commons_added_at: number | null }
+        | undefined;
+      return Boolean(row && row.commons_added_at !== null);
+    },
     listMembersForArticle(articleId) {
       const rows = statements.membersForArticle.all(articleId) as Array<{
         member_id: string;
@@ -446,6 +549,8 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
       const totalAgreementRows = (statements.totalAgreementRowsCount.get() as { n: number }).n;
       const eligibleCount =
         (statements.countEligible.get(requiredAgreementCount) as { n: number }).n;
+      const eligibleNotYetAddedCount =
+        (statements.countEligibleNotYetCommonsAdded.get(requiredAgreementCount) as { n: number }).n;
       const inProgressMemberCount =
         (statements.countInProgressMembers.get(requiredAgreementCount) as { n: number }).n;
       const commonsAddedMemberCount = (statements.commonsAddedCount.get() as { n: number }).n;
@@ -457,6 +562,16 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
         maxListedMembers,
       );
       const eligibleMembers = eligibleRows.map((r) => ({
+        memberId: r.member_id,
+        fullName: r.full_name,
+        agreementCount: r.agreement_count,
+      }));
+
+      const eligibleNotYetAddedRows = statements.eligibleNotYetCommonsAddedLimited.all(
+        requiredAgreementCount,
+        maxListedMembers,
+      );
+      const eligibleNotYetAddedMembers = eligibleNotYetAddedRows.map((r) => ({
         memberId: r.member_id,
         fullName: r.full_name,
         agreementCount: r.agreement_count,
@@ -474,10 +589,12 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
         distinctMembersWithAgreement,
         totalAgreementRows,
         eligibleCount,
+        eligibleNotYetAddedCount,
         inProgressMemberCount,
         commonsAddedMemberCount,
         processedEmailCount,
         eligibleMembers,
+        eligibleNotYetAddedMembers,
         inProgressMembers,
       };
     },

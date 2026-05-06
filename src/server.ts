@@ -66,6 +66,19 @@ const DEFAULT_USER_AGENT =
 const DEFAULT_AUDIT_CRON = '0 3 * * *';
 const CRON_OFF_VALUES = new Set(['off', 'disabled', 'false', 'no', '0']);
 
+/**
+ * Stage 4f: reconcile-scope env var. Default 'all-eligible' (re-run for
+ * every member at threshold; idempotent, catches drift). Set to
+ * `not-yet-added` to skip members whose commons_added_at is set —
+ * faster runs at the cost of trusting the verified-added flag.
+ * Anything else falls back to default. Read at server boot AND at
+ * each manual reconcile invocation (no restart needed for changes).
+ */
+const RECONCILE_SCOPE_NOT_YET_ADDED = 'not-yet-added';
+function reconcileOnlyNotYetAdded(raw: string | undefined): boolean {
+  return (raw ?? '').trim().toLowerCase() === RECONCILE_SCOPE_NOT_YET_ADDED;
+}
+
 function resolveCronExpr(raw: string | undefined, defaultExpr: string | null): string | null {
   const trimmed = raw?.trim();
   if (trimmed === undefined || trimmed === '') return defaultExpr;
@@ -358,7 +371,7 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
     if (!headless.ok) { res.status(400).json({ error: headless.error }); return; }
 
     const job = buildAddToAllSpacesJob(
-      { addSpaceMember: deps.addSpaceMember },
+      { addSpaceMember: deps.addSpaceMember, store: deps.agreementsStore },
       { fullMemberName: fullMemberName.value, memberId: memberId.value },
     );
     // The manual endpoint always runs at its requested headless-ness.
@@ -403,11 +416,13 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
 
     app.post('/run/reconcile-commons-membership', async (_req: Request, res: Response) => {
       const store = deps.agreementsStore!;
+      const onlyNotYetAdded = reconcileOnlyNotYetAdded(process.env.RECONCILE_COMMONS_SCOPE);
       const members = enqueueCommonsMembershipRepairJobs(
         scheduler,
         { addSpaceMember: deps.addSpaceMember },
         store,
         (msg) => console.log(msg),
+        { onlyNotYetAdded },
       );
       res.status(200).json({
         enqueued: members.length,
@@ -567,7 +582,7 @@ if (isMainModule) {
         }),
       enqueueAddAllSpaces: ({ memberId, fullName }) => {
         const job = buildAddToAllSpacesJob(
-          { addSpaceMember: defaultAddSpaceMember },
+          { addSpaceMember: defaultAddSpaceMember, store: agreementsStore },
           { fullMemberName: fullName, memberId, reason: '[auto]' },
         );
         void scheduler.enqueueBackground(job).catch((err) =>
@@ -580,10 +595,15 @@ if (isMainModule) {
     const reconcileExpr = resolveReconcileCronExpr(process.env.RECONCILE_COMMONS_CRON);
     if (reconcileExpr !== null) {
       reconcileCronTask = safeCronSchedule('reconcile-commons', reconcileExpr, () => {
+        /* Read scope at fire time so operators can flip the toggle
+         * without restarting (the env var is read on every tick). */
+        const onlyNotYetAdded = reconcileOnlyNotYetAdded(process.env.RECONCILE_COMMONS_SCOPE);
         enqueueCommonsMembershipRepairJobs(
           scheduler,
           { addSpaceMember: defaultAddSpaceMember },
           agreementsStore,
+          undefined,
+          { onlyNotYetAdded },
         );
       });
     }

@@ -351,6 +351,145 @@ describe('agreementsStore', () => {
     });
   });
 
+  /*
+   * Stage 4f — verified-added flag.
+   *
+   * Today `members.added_at` is set by `claimAddForMember()` BEFORE the
+   * add-all-spaces job runs; it's a dedup gate, not a "is the member
+   * actually in every commons space?" answer. Stage 4f introduces:
+   *
+   *   - members.commons_added_at INTEGER NULL  (new column)
+   *   - markCommonsAdded(memberId, when?)      (set on add-job success)
+   *   - isCommonsAdded(memberId)               (read back)
+   *   - listMembersEligibleNotYetCommonsAdded() — eligible AND flag IS NULL
+   *
+   * Behavioural invariants this block pins:
+   *   1. `added_at` and `commons_added_at` are independent. Setting the
+   *      dedup gate does NOT mark the member as verified-added.
+   *   2. `markCommonsAdded` silently no-ops on unknown members so the
+   *      manual add-by-name endpoint is safe to wire through it.
+   *   3. `listMembersEligibleForCommonsAdd` (used by reconcile) still
+   *      returns ALL eligible members regardless of the new flag —
+   *      reconcile chooses scope at its own level.
+   *   4. `commonsAddedMemberCount` in the overview switches to count
+   *      `commons_added_at IS NOT NULL` (operator-visible counter
+   *      now matches the 'verified added' semantic).
+   */
+  describe('Stage 4f commons_added_at', () => {
+    it('starts unset on a fresh member row', () => {
+      store.recordAgreement(agreement('m1', 'a1'));
+      expect(store.isCommonsAdded('m1')).toBe(false);
+    });
+
+    it('markCommonsAdded sets the flag for an existing member', () => {
+      store.recordAgreement(agreement('m1', 'a1'));
+      store.markCommonsAdded('m1');
+      expect(store.isCommonsAdded('m1')).toBe(true);
+    });
+
+    it('markCommonsAdded silently no-ops on an unknown member', () => {
+      expect(() => store.markCommonsAdded('m-ghost')).not.toThrow();
+      expect(store.isCommonsAdded('m-ghost')).toBe(false);
+    });
+
+    it('markCommonsAdded is idempotent on repeated calls', () => {
+      store.recordAgreement(agreement('m1', 'a1'));
+      store.markCommonsAdded('m1', 1);
+      expect(() => store.markCommonsAdded('m1', 2)).not.toThrow();
+      expect(store.isCommonsAdded('m1')).toBe(true);
+    });
+
+    it('added_at and commons_added_at are independent (dedup gate vs verified-added)', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 2 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1'));
+        tiny.recordAgreement(agreement('m1', 'a2'));
+        expect(tiny.claimAddForMember('m1')).toBe(true);
+        expect(tiny.isMemberAdded('m1')).toBe(true);
+        /* Dedup gate flipped, but verified-added has not. */
+        expect(tiny.isCommonsAdded('m1')).toBe(false);
+
+        tiny.markCommonsAdded('m1');
+        expect(tiny.isCommonsAdded('m1')).toBe(true);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('listMembersEligibleNotYetCommonsAdded returns eligible members whose flag is null', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 2 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1', { fullName: 'Alice' }));
+        tiny.recordAgreement(agreement('m1', 'a2', { fullName: 'Alice' }));
+        tiny.recordAgreement(agreement('m2', 'a1', { fullName: 'Bob' }));
+        tiny.recordAgreement(agreement('m2', 'a2', { fullName: 'Bob' }));
+
+        const before = tiny.listMembersEligibleNotYetCommonsAdded();
+        expect(before.map((r) => r.memberId).sort()).toEqual(['m1', 'm2']);
+
+        tiny.markCommonsAdded('m1');
+        const after = tiny.listMembersEligibleNotYetCommonsAdded();
+        expect(after.map((r) => r.memberId)).toEqual(['m2']);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('listMembersEligibleForCommonsAdd is unchanged: still returns ALL eligible regardless of commons_added_at', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 2 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1'));
+        tiny.recordAgreement(agreement('m1', 'a2'));
+        tiny.markCommonsAdded('m1');
+        const rows = tiny.listMembersEligibleForCommonsAdd();
+        expect(rows.map((r) => r.memberId)).toEqual(['m1']);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('overview.commonsAddedMemberCount counts commons_added_at IS NOT NULL (verified-added semantic)', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 2 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1'));
+        tiny.recordAgreement(agreement('m1', 'a2'));
+        /* Dedup gate alone must NOT bump the counter — that was the
+         * old (Stage 4a) semantic where the counter inflated as soon
+         * as a job was enqueued, even if the job later failed. */
+        expect(tiny.claimAddForMember('m1')).toBe(true);
+        expect(tiny.getAgreementsOverview().commonsAddedMemberCount).toBe(0);
+
+        tiny.markCommonsAdded('m1');
+        expect(tiny.getAgreementsOverview().commonsAddedMemberCount).toBe(1);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('overview exposes eligibleNotYetAddedMembers / eligibleNotYetAddedCount alongside the unchanged eligible* fields', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 2 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1', { fullName: 'Alice' }));
+        tiny.recordAgreement(agreement('m1', 'a2', { fullName: 'Alice' }));
+        tiny.recordAgreement(agreement('m2', 'a1', { fullName: 'Bob' }));
+        tiny.recordAgreement(agreement('m2', 'a2', { fullName: 'Bob' }));
+
+        const o1 = tiny.getAgreementsOverview();
+        expect(o1.eligibleCount).toBe(2);
+        expect(o1.eligibleNotYetAddedCount).toBe(2);
+        expect(o1.eligibleNotYetAddedMembers.map((r) => r.memberId).sort()).toEqual(['m1', 'm2']);
+
+        tiny.markCommonsAdded('m1');
+        const o2 = tiny.getAgreementsOverview();
+        expect(o2.eligibleCount).toBe(2); // baseline "at threshold" stays
+        expect(o2.eligibleNotYetAddedCount).toBe(1);
+        expect(o2.eligibleNotYetAddedMembers.map((r) => r.memberId)).toEqual(['m2']);
+      } finally {
+        tiny.close();
+      }
+    });
+  });
+
   describe('schema migration', () => {
     it('opening an existing DB file twice is idempotent and preserves data', () => {
       // Use a temp file path so we can re-open it.

@@ -78,9 +78,46 @@ same `TaskScheduler` as IMAP. Optional `RECONCILE_COMMONS_CRON`; manual
   Refresh), inbox poll button when IMAP telemetry is present, **Copy status JSON** (last successful dashboard payload),
   reconcile disabled when the agreements store is not mounted (**Enqueue reconcile** / Stage 4c).
 
-### Stage 4e: Change of heart -- PENDING
-Detect edits/deletes/new-disagreements during reconciliation; DM the
-member with a warning. Schema additions drafted in the plan.
+### Stage 4e: Change of heart -- DONE
+
+A daily change-of-heart audit walks every agreement post, expands all
+"Previous Comments" loaders, scrapes the live comment list, and classifies
+each member who already has a row in `agreements`:
+
+- `'deleted'` — no current comment from this member (case 1, anomaly)
+- `'edited'` — exactly one current comment, no longer matches the agree regex (case 2, anomaly)
+- `'mixed'` — multiple current comments, at least one fails to match (case 3, anomaly)
+- `'multi_agreement'` — multiple current comments, all match (case 4, *not* an anomaly)
+- `'happy'` — exactly one current comment that matches (silent default)
+
+Anomalous rows (`'deleted'`/`'edited'`/`'mixed'`) are excluded from the
+member's effective agreement count via audit-aware `WHERE` clauses on every
+counting query, so a member who hits "change of heart" automatically falls
+below threshold and stops being eligible until they re-record. The first
+three cases populate the names listed in the admin email; the fourth case
+does not (matching the spec).
+
+Triggers:
+- `POST /run/audit-agreements` (manual; uses the exclusive scheduler lock).
+- `AGREEMENTS_AUDIT_CRON` env var. **Default ON** at `0 3 * * *`. Set to
+  `off` / `disabled` / `false` / `no` / `0` (case-insensitive) to disable;
+  any other value is treated as a literal cron expression.
+- UI: **Audit agreements (change of heart)** button in the
+  Agreements & commons membership tab.
+
+Email: every audit run sends a `sendRunLogEmail` whose summary is either
+`0 anomalies — all clear (…)` or `N anomaly(ies): Alice (deleted), …`.
+
+Files:
+- `src/tasks/auditAgreements.ts` — pure `classifyMemberOnArticle` classifier.
+- `src/tasks/changeOfHeartAuditJob.ts` — `SchedulerJob` that scrapes + classifies + writes audit_state.
+- `src/state/agreementsStore.ts` — adds `audit_state` / `audit_at` columns
+  (idempotent ALTER), `recordAuditOutcome`, `getAuditState`,
+  `listMembersForArticle`; `recordAgreement` becomes an upsert that resets
+  `audit_state` to NULL on re-record so a fresh "I agree" lifts the row back.
+- `src/server.ts` — `POST /run/audit-agreements` + `AGREEMENTS_AUDIT_CRON`
+  resolver (`resolveAuditCronExpr`) + cron schedule.
+- `public/index.html` — audit button + handler.
 
 ## TODO
 - index.html after clicking an action button (Remove or Add) replace those action
@@ -91,6 +128,12 @@ with kt@kevintriplett.com -- DONE (see `src/email.ts`; silently no-ops unless
 NODE_ENV=production AND all SMTP_* env vars are set; SMTP_* vars live in `.env.example`)
 - debug addSpaceMember error, usually on first and sometimes second space, ERROR: Member search:
 selector not found (.filter-bar-search-region div[aria-label='Search Members']) -- DONE
+- when reconciling, add code to expand all comments because mighty networks only displays
+a subset of comments, not all -- DONE (Stage 4e: audit job clicks
+`.load-more-wrapper-previous a` until no more loader appears)
+- when reconciling, send email to admin iff one or more members comments do not match
+the agree regex -- DONE (Stage 4e always emails: "0 anomalies — all clear" or
+"N anomaly(ies): Alice (deleted), …" — Q4 directive to send the happy case too)
 
 ## Stack
 - Runtime: Node.js

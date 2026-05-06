@@ -29,14 +29,80 @@ import {
   type ImapPoller,
   type PollResult,
 } from './ingestion/imapPoller.js';
-import { AGREEMENT_ARTICLES, REQUIRED_AGREEMENT_COUNT } from './config/agreements.js';
+import { AGREEMENT_ARTICLES, REQUIRED_AGREEMENT_COUNT, type AgreementArticle } from './config/agreements.js';
 import { buildAddToAllSpacesJob, ALREADY_A_MEMBER } from './tasks/addToAllSpacesJob.js';
 import { enqueueCommonsMembershipRepairJobs } from './tasks/membershipReconcile.js';
+import {
+  buildChangeOfHeartAuditJob,
+  type ChangeOfHeartAuditDeps,
+} from './tasks/changeOfHeartAuditJob.js';
 import cron from 'node-cron';
 
 const publicDir = path.join(process.cwd(), 'public');
 const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36';
+
+/**
+ * Generic cron-env-var resolver.
+ *
+ *   undefined / empty / whitespace -> defaultExpr  (null = "default off")
+ *   off | disabled | false | no | 0 (any case)
+ *                                  -> null         (explicit opt-out)
+ *   anything else                  -> raw verbatim (treated as a cron expr)
+ *
+ * Both `AGREEMENTS_AUDIT_CRON` (default-on) and `RECONCILE_COMMONS_CRON`
+ * (default-off, opt-in) use this. Sharing it keeps the off-sentinel set in
+ * one place — the original reconcile resolver was a one-line truthy check,
+ * which crashed the server on startup when an operator set the env var to
+ * the literal string "off" and node-cron tried to parse it as a cron expr.
+ *
+ * NOTE: These constants and the resolver MUST stay above
+ * `createAppWithScheduler`. The entry-point block (`if (isMainModule)`)
+ * calls `createAppWithScheduler`, which calls these resolvers during
+ * top-level module execution. Function declarations are hoisted but `const`
+ * initializations are not — placing them below would put the consts in the
+ * TDZ at call time and crash on `npm start`.
+ */
+const DEFAULT_AUDIT_CRON = '0 3 * * *';
+const CRON_OFF_VALUES = new Set(['off', 'disabled', 'false', 'no', '0']);
+
+function resolveCronExpr(raw: string | undefined, defaultExpr: string | null): string | null {
+  const trimmed = raw?.trim();
+  if (trimmed === undefined || trimmed === '') return defaultExpr;
+  if (CRON_OFF_VALUES.has(trimmed.toLowerCase())) return null;
+  return trimmed;
+}
+
+export function resolveAuditCronExpr(raw: string | undefined): string | null {
+  return resolveCronExpr(raw, DEFAULT_AUDIT_CRON);
+}
+
+export function resolveReconcileCronExpr(raw: string | undefined): string | null {
+  return resolveCronExpr(raw, null);
+}
+
+/**
+ * Schedule a cron task with a friendly error message instead of a crash if
+ * the expression is malformed. node-cron throws synchronously inside
+ * `schedule(...)` for invalid patterns; without this guard a typo in the
+ * env var ("evry day at 3am") tears down the whole server on startup.
+ */
+function safeCronSchedule(
+  label: string,
+  expr: string,
+  fn: () => void,
+): ReturnType<typeof cron.schedule> | undefined {
+  try {
+    return cron.schedule(expr, fn);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[cron] Failed to schedule ${label} with expression "${expr}": ${message}. ` +
+        `The server will continue running without this cron.`,
+    );
+    return undefined;
+  }
+}
 
 export type BrowserHandle = {
   newPage: () => Promise<Page>;
@@ -63,6 +129,19 @@ export type CreateAppDeps = {
   agreementsImapPollOnce?: () => Promise<PollResult>;
   /** Live IMAP poller telemetry for `/status/agreements`. */
   agreementsImapSnapshot?: () => AgreementsImapRuntimeSnapshot;
+  /**
+   * Stage 4e: override the change-of-heart audit's page scraper. Production
+   * leaves this undefined — the audit job uses its built-in
+   * goto+login+expand+scrape against the live MN post page. Tests inject a
+   * stub returning canned `ScrapedComment[]` per articleId.
+   */
+  auditAgreementsLoadAndScrape?: ChangeOfHeartAuditDeps['loadAndScrapeArticleComments'];
+  /**
+   * Stage 4e: override the article list the audit walks. Production uses
+   * `AGREEMENT_ARTICLES`; tests pass synthetic articles to keep the
+   * orchestration hermetic.
+   */
+  auditAgreementsArticles?: readonly AgreementArticle[];
 };
 
 /** Mutable slice of-process state for `/status/agreements` (filled by poll wire-up). */
@@ -339,6 +418,29 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
         })),
       });
     });
+
+    // ---------------------------------------------------------------------
+    // Stage 4e: change-of-heart audit (manual trigger)
+    // ---------------------------------------------------------------------
+
+    app.post('/run/audit-agreements', async (req: Request, res: Response) => {
+      const body = req.body as Record<string, unknown>;
+      /* `headless` is a dev-affordance: prod cron always launches headless
+       * (its caller is `enqueueBackground` which never touches this field).
+       * From the UI the operator can set it to false to watch the audit
+       * happen in a visible browser while debugging selectors. Defaults to
+       * true to match the prod cron path. */
+      const headless = parseHeadless(body);
+      if (!headless.ok) { res.status(400).json({ error: headless.error }); return; }
+
+      const store = deps.agreementsStore!;
+      const job = buildChangeOfHeartAuditJob(store, {
+        loadAndScrapeArticleComments: deps.auditAgreementsLoadAndScrape,
+        articles: deps.auditAgreementsArticles,
+      });
+      job.headless = headless.value;
+      await runExclusiveBrowserTask(res, job);
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -403,6 +505,7 @@ if (isMainModule) {
   /** Set immediately after createApp uses the closure shape; polls run only after assignment. */
   let imapPoller: ImapPoller | undefined;
   let reconcileCronTask: ReturnType<typeof cron.schedule> | undefined;
+  let auditCronTask: ReturnType<typeof cron.schedule> | undefined;
 
   const agreementsImapScratch: {
     lastPollCompletedAt: string | null;
@@ -474,9 +577,9 @@ if (isMainModule) {
       log: (m) => console.log(`[imap] ${m}`),
     });
 
-    const reconcileExpr = process.env.RECONCILE_COMMONS_CRON?.trim();
-    if (reconcileExpr) {
-      reconcileCronTask = cron.schedule(reconcileExpr, () => {
+    const reconcileExpr = resolveReconcileCronExpr(process.env.RECONCILE_COMMONS_CRON);
+    if (reconcileExpr !== null) {
+      reconcileCronTask = safeCronSchedule('reconcile-commons', reconcileExpr, () => {
         enqueueCommonsMembershipRepairJobs(
           scheduler,
           { addSpaceMember: defaultAddSpaceMember },
@@ -484,11 +587,28 @@ if (isMainModule) {
         );
       });
     }
+
+    /* Stage 4e change-of-heart audit cron. Per Kevin's directive, this is
+     * default-ON: an unset variable means "run at the default schedule"
+     * and the only way to disable is an explicit opt-out value
+     * (case-insensitive: 'off' | 'disabled' | 'false' | 'no' | '0').
+     * Any other non-empty value is interpreted as a literal cron
+     * expression. */
+    const auditExpr = resolveAuditCronExpr(process.env.AGREEMENTS_AUDIT_CRON);
+    if (auditExpr !== null) {
+      auditCronTask = safeCronSchedule('change-of-heart-audit', auditExpr, () => {
+        const job = buildChangeOfHeartAuditJob(agreementsStore);
+        void scheduler.enqueueBackground(job).catch((err) => {
+          console.error(`[audit] scheduled change-of-heart audit failed:`, err);
+        });
+      });
+    }
   }
 
   server.on('close', () => {
     imapPoller?.stop();
     reconcileCronTask?.stop();
+    auditCronTask?.stop();
   });
 
   server.listen(port, () => {
@@ -500,6 +620,14 @@ if (isMainModule) {
       imapPoller?.start(imapPollIntervalMs);
       if (reconcileCronTask && process.env.RECONCILE_COMMONS_CRON?.trim()) {
         console.log(`Reconciliation cron: ${process.env.RECONCILE_COMMONS_CRON!.trim()}`);
+      } else {
+        console.log('Reconciliation cron: disabled (RECONCILE_COMMONS_CRON=off)');
+      }
+      const auditExprActive = resolveAuditCronExpr(process.env.AGREEMENTS_AUDIT_CRON);
+      if (auditCronTask && auditExprActive !== null) {
+        console.log(`Change-of-heart audit cron: ${auditExprActive}`);
+      } else {
+        console.log('Change-of-heart audit cron: disabled (AGREEMENTS_AUDIT_CRON=off)');
       }
     } else {
       console.log(
@@ -508,3 +636,8 @@ if (isMainModule) {
     }
   });
 }
+
+/* `resolveAuditCronExpr` and its constants live near the top of the file so
+ * they're initialized before `createAppWithScheduler` is invoked from the
+ * entry-point block; see the comment above their declaration for the TDZ
+ * rationale. */

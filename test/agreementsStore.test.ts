@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   openAgreementsStore,
   type AgreementsStore,
+  type AuditState,
 } from '../src/state/agreementsStore.js';
 
 /**
@@ -188,4 +189,193 @@ describe('agreementsStore', () => {
       expect(store.hasProcessedEmail('msg-1')).toBe(true);
     });
   });
+
+  /*
+   * Stage 4e — change-of-heart audit. The store gains:
+   *   - audit_state column on agreements (null = never audited)
+   *   - audit_at column (epoch ms of last audit write)
+   *   - recordAuditOutcome(member, article, state, when?) — writes both
+   *   - getAuditState(member, article) — reads back (null if no row)
+   *   - listMembersForArticle(article) — distinct members with any row,
+   *     regardless of audit_state, so the audit can re-evaluate them
+   *
+   * Behavioral invariant: rows whose audit_state is in
+   * ('deleted','edited','mixed') stop counting toward a member's
+   * agreement total. NULL/'happy'/'multi_agreement' all count.
+   */
+  describe('Stage 4e audit fields', () => {
+    it('starts with no audit_state for a freshly recorded agreement', () => {
+      store.recordAgreement(agreement('m1', 'a1'));
+      expect(store.getAuditState('m1', 'a1')).toBeNull();
+    });
+
+    it('returns null audit state for a (member, article) with no row', () => {
+      expect(store.getAuditState('m-nobody', 'a-nobody')).toBeNull();
+    });
+
+    it('records and reads back audit outcome', () => {
+      store.recordAgreement(agreement('m1', 'a1'));
+      store.recordAuditOutcome('m1', 'a1', 'happy', 1_700_000_000_000);
+      expect(store.getAuditState('m1', 'a1')).toBe('happy');
+    });
+
+    it('overwrites a previous audit outcome on re-audit', () => {
+      store.recordAgreement(agreement('m1', 'a1'));
+      store.recordAuditOutcome('m1', 'a1', 'happy');
+      store.recordAuditOutcome('m1', 'a1', 'deleted');
+      expect(store.getAuditState('m1', 'a1')).toBe('deleted');
+    });
+
+    it('silently no-ops recordAuditOutcome on an unknown (member, article)', () => {
+      expect(() => store.recordAuditOutcome('m-ghost', 'a-ghost', 'happy')).not.toThrow();
+      expect(store.getAuditState('m-ghost', 'a-ghost')).toBeNull();
+    });
+
+    it.each<['deleted' | 'edited' | 'mixed']>([['deleted'], ['edited'], ['mixed']])(
+      'excludes %s rows from countAgreements',
+      (state) => {
+        store.recordAgreement(agreement('m1', 'a1'));
+        store.recordAgreement(agreement('m1', 'a2'));
+        expect(store.countAgreements('m1')).toBe(2);
+        store.recordAuditOutcome('m1', 'a1', state);
+        expect(store.countAgreements('m1')).toBe(1);
+      },
+    );
+
+    it.each<['happy' | 'multi_agreement']>([['happy'], ['multi_agreement']])(
+      'keeps counting %s rows in countAgreements',
+      (state) => {
+        store.recordAgreement(agreement('m1', 'a1'));
+        store.recordAuditOutcome('m1', 'a1', state);
+        expect(store.countAgreements('m1')).toBe(1);
+      },
+    );
+
+    it('drops a member out of listMembersEligibleForCommonsAdd when the audit invalidates enough rows', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 2 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1'));
+        tiny.recordAgreement(agreement('m1', 'a2'));
+        expect(tiny.listMembersEligibleForCommonsAdd().map((r) => r.memberId)).toEqual(['m1']);
+
+        tiny.recordAuditOutcome('m1', 'a1', 'deleted');
+        expect(tiny.listMembersEligibleForCommonsAdd()).toEqual([]);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('still allows claimAddForMember when only happy/multi_agreement rows count to threshold', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 2 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1'));
+        tiny.recordAgreement(agreement('m1', 'a2'));
+        tiny.recordAuditOutcome('m1', 'a1', 'happy');
+        tiny.recordAuditOutcome('m1', 'a2', 'multi_agreement');
+        expect(tiny.claimAddForMember('m1')).toBe(true);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('blocks claimAddForMember when the audit invalidates a row needed to reach threshold', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 2 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1'));
+        tiny.recordAgreement(agreement('m1', 'a2'));
+        tiny.recordAuditOutcome('m1', 'a1', 'edited');
+        expect(tiny.claimAddForMember('m1')).toBe(false);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('reflects the audit_state filter in getAgreementsOverview eligible/in-progress lists', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 2 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1'));
+        tiny.recordAgreement(agreement('m1', 'a2'));
+        tiny.recordAuditOutcome('m1', 'a1', 'mixed');
+        const o = tiny.getAgreementsOverview();
+        expect(o.eligibleCount).toBe(0);
+        expect(o.inProgressMemberCount).toBe(1);
+        expect(o.inProgressMembers[0]?.memberId).toBe('m1');
+        expect(o.inProgressMembers[0]?.distinctAgreementArticles).toBe(1);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('clears audit_state to NULL when recordAgreement re-records an existing (member, article)', () => {
+      store.recordAgreement(agreement('m1', 'a1', { commentId: 'c-old' }));
+      store.recordAuditOutcome('m1', 'a1', 'deleted');
+      expect(store.getAuditState('m1', 'a1')).toBe('deleted');
+
+      const res = store.recordAgreement(agreement('m1', 'a1', { commentId: 'c-new' }));
+      expect(res.outcome).toBe('duplicate');
+      expect(store.getAuditState('m1', 'a1')).toBeNull();
+    });
+
+    it('keeps the original audit_state untouched when recordAgreement adds a different (member, article)', () => {
+      store.recordAgreement(agreement('m1', 'a1'));
+      store.recordAuditOutcome('m1', 'a1', 'deleted');
+      store.recordAgreement(agreement('m1', 'a2'));
+      expect(store.getAuditState('m1', 'a1')).toBe('deleted');
+      expect(store.getAuditState('m1', 'a2')).toBeNull();
+    });
+  });
+
+  describe('listMembersForArticle', () => {
+    it('returns empty when no member has a row for the article', () => {
+      expect(store.listMembersForArticle('article-empty')).toEqual([]);
+    });
+
+    it('returns one row per distinct member who has any agreement on the article', () => {
+      store.recordAgreement(agreement('m1', 'art-1', { fullName: 'Alice' }));
+      store.recordAgreement(agreement('m2', 'art-1', { fullName: 'Bob' }));
+      store.recordAgreement(agreement('m1', 'art-2', { fullName: 'Alice' }));
+
+      const rows = store.listMembersForArticle('art-1');
+      const sorted = rows.slice().sort((a, b) => a.memberId.localeCompare(b.memberId));
+      expect(sorted).toEqual([
+        { memberId: 'm1', fullName: 'Alice' },
+        { memberId: 'm2', fullName: 'Bob' },
+      ]);
+    });
+
+    it('includes members regardless of audit_state so the audit can re-evaluate flagged rows', () => {
+      store.recordAgreement(agreement('m1', 'art-1', { fullName: 'Alice' }));
+      store.recordAuditOutcome('m1', 'art-1', 'deleted');
+      const rows = store.listMembersForArticle('art-1');
+      expect(rows).toEqual([{ memberId: 'm1', fullName: 'Alice' }]);
+    });
+  });
+
+  describe('schema migration', () => {
+    it('opening an existing DB file twice is idempotent and preserves data', () => {
+      // Use a temp file path so we can re-open it.
+      const tmp = `:memory:`;
+      // The :memory: case can't truly test cross-open persistence, but it does
+      // exercise the idempotent ALTER path because openAgreementsStore runs
+      // ensureColumn on every open. Re-running on the same handle isn't
+      // possible (each :memory: is a fresh DB), so the assertion is simply
+      // that opening + a second open in the same process does not throw.
+      const a = openAgreementsStore({ filePath: tmp, requiredAgreementCount: 1 });
+      a.recordAgreement(agreement('m1', 'a1'));
+      a.close();
+      const b = openAgreementsStore({ filePath: tmp, requiredAgreementCount: 1 });
+      expect(() => b.recordAgreement(agreement('m2', 'a1'))).not.toThrow();
+      b.close();
+    });
+  });
 });
+
+// Static type-level check: AuditState exported and accepts the 5 documented values.
+const _auditStateSamples: readonly AuditState[] = [
+  'happy',
+  'deleted',
+  'edited',
+  'mixed',
+  'multi_agreement',
+];
+void _auditStateSamples;

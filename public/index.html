@@ -347,6 +347,7 @@
         <button type="button" class="primary" id="btn-agreements-poll">Poll inbox now</button>
         <button type="button" id="btn-agreements-copy-json">Copy status JSON</button>
         <button type="button" id="btn-reconcile-membership">Enqueue reconcile</button>
+        <button type="button" id="btn-audit-agreements">Audit agreements (change of heart)</button>
       </div>
     </section>
 
@@ -369,6 +370,7 @@
         const btnAgreementsPoll = document.getElementById('btn-agreements-poll');
         const btnAgreementsCopyJson = document.getElementById('btn-agreements-copy-json');
         const btnReconcileMembership = document.getElementById('btn-reconcile-membership');
+        const btnAuditAgreements = document.getElementById('btn-audit-agreements');
         const btnClear = document.getElementById('btn-clear-log');
         const spaceSelect = document.getElementById('space-select');
         const chkHeadless = document.getElementById('chk-headless');
@@ -1006,6 +1008,74 @@
             void refreshAgreementsStatus({ quiet: true });
           } catch (e) {
             appendLog('ERROR: ' + (e && e.message ? e.message : String(e)));
+          }
+        });
+
+        btnAuditAgreements.addEventListener('click', async function () {
+          /* Stage 4e: blocking exclusive Puppeteer task that walks every
+           * agreement article, scrapes comments, classifies each known
+           * member, and writes audit_state. Server returns 200 with the
+           * structured result (or 409 if another task holds the browser
+           * lock). */
+          if (
+            !confirm(
+              'Run the change-of-heart audit now? This walks every agreement post and may take a few minutes.',
+            )
+          )
+            return;
+          clearResult();
+          /* The `headless` field is a dev affordance — prod cron always
+           * runs headless (it doesn't go through this endpoint). From the
+           * UI you can untick the global "Headless mode" checkbox to watch
+           * the audit drive a visible browser while debugging selectors. */
+          const headless = chkHeadless.checked;
+          appendLog('[audit] POST /run/audit-agreements (headless=' + headless + ') …');
+          btnAuditAgreements.disabled = true;
+          try {
+            const res = await fetch('/run/audit-agreements', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ headless: headless }),
+            });
+            const body = await res.json().catch(function () {
+              return {};
+            });
+            if (res.status === 404) {
+              appendLog('[audit] ERROR: endpoint not configured (404). Agreements store disabled on server.');
+              showResult(
+                '<p><strong>404</strong> — This server did not enable the EC admin agreements store, so the audit is unavailable.</p>',
+                true,
+              );
+              return;
+            }
+            if (res.status === 409) {
+              appendLog('[audit] Another task is already using the browser. Try again when it finishes.');
+              showResult('<strong>409</strong> — Browser is busy with another task.', true);
+              return;
+            }
+            if (!res.ok) {
+              appendLog('ERROR: ' + (body.error || res.statusText));
+              showResult(
+                '<strong>HTTP ' + res.status + '</strong><pre>' +
+                  escapeHtml(JSON.stringify(body, null, 2)) +
+                  '</pre>',
+                true,
+              );
+              return;
+            }
+            const total = typeof body.totalAnomalies === 'number' ? body.totalAnomalies : '?';
+            appendLog('[audit] Done — ' + total + ' anomaly(ies) across ' + (body.articles ? body.articles.length : '?') + ' article(s).');
+            showResult(
+              '<strong>Audit complete — ' + total + ' anomaly(ies)</strong><pre>' +
+                escapeHtml(JSON.stringify(body, null, 2)) +
+                '</pre>',
+              total > 0,
+            );
+            void refreshAgreementsStatus({ quiet: true });
+          } catch (e) {
+            appendLog('ERROR: ' + (e && e.message ? e.message : String(e)));
+          } finally {
+            btnAuditAgreements.disabled = false;
           }
         });
 

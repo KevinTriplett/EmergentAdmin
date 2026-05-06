@@ -4,7 +4,7 @@ import http from 'node:http';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Page } from 'puppeteer';
-import { createApp } from '../src/server.js';
+import { createApp, resolveAuditCronExpr, resolveReconcileCronExpr } from '../src/server.js';
 import { openAgreementsStore } from '../src/state/agreementsStore.js';
 import type { PollResult } from '../src/ingestion/imapPoller.js';
 
@@ -583,6 +583,264 @@ describe('createApp', () => {
       await closeServer(server);
       store.close();
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // POST /run/audit-agreements (Stage 4e)
+  // -------------------------------------------------------------------------
+
+  it('POST /run/audit-agreements returns 404 when agreements store is not configured', async () => {
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/audit-agreements').send({});
+      expect(res.status).toBe(404);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('POST /run/audit-agreements returns the audit result and writes audit_state to the store', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    store.recordAgreement({
+      memberId: 'm-changed-mind',
+      fullName: 'Changed Mindy',
+      articleId: 'art-1',
+      commentId: 'c-old',
+      commentedAt: 1,
+      source: 'email',
+    });
+    store.recordAgreement({
+      memberId: 'm-still-here',
+      fullName: 'Steady Steven',
+      articleId: 'art-1',
+      commentId: 'c-old',
+      commentedAt: 1,
+      source: 'email',
+    });
+
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+      auditAgreementsArticles: [
+        {
+          articleId: 'art-1',
+          spaceId: 'space-1',
+          title: 'The Agreement',
+          url: 'https://emergent-commons.mn.co/posts/art-1',
+        },
+      ],
+      // Mindy is gone from the page; Steven still says "I agree".
+      auditAgreementsLoadAndScrape: async () => [
+        {
+          commentId: 'c-still-here',
+          memberId: 'm-still-here',
+          fullName: 'Steady Steven',
+          text: 'I agree',
+        },
+      ],
+    });
+
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/audit-agreements').send({});
+      expect(res.status).toBe(200);
+      expect(res.body.totalAnomalies).toBe(1);
+      expect(res.body.totalMembersAudited).toBe(2);
+      expect(res.body.anomalies[0]).toMatchObject({
+        memberId: 'm-changed-mind',
+        articleId: 'art-1',
+        state: 'deleted',
+      });
+      expect(store.getAuditState('m-changed-mind', 'art-1')).toBe('deleted');
+      expect(store.getAuditState('m-still-here', 'art-1')).toBe('happy');
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  it('POST /run/audit-agreements defaults to headless=true when no body field is provided', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+      auditAgreementsArticles: [],
+      auditAgreementsLoadAndScrape: async () => [],
+    });
+
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/audit-agreements').send({});
+      expect(res.status).toBe(200);
+      expect(launchBrowser).toHaveBeenCalledWith(true);
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  it('POST /run/audit-agreements honours { headless: false } from the body (dev-mode visible browser)', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+      auditAgreementsArticles: [],
+      auditAgreementsLoadAndScrape: async () => [],
+    });
+
+    await listen(server);
+    try {
+      const res = await request(server)
+        .post('/run/audit-agreements')
+        .send({ headless: false });
+      expect(res.status).toBe(200);
+      expect(launchBrowser).toHaveBeenCalledWith(false);
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  it('POST /run/audit-agreements rejects non-boolean headless with 400', async () => {
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+    });
+
+    await listen(server);
+    try {
+      const res = await request(server)
+        .post('/run/audit-agreements')
+        .send({ headless: 'yes' });
+      expect(res.status).toBe(400);
+      expect(launchBrowser).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  it('POST /run/audit-agreements emails admin via sendRunLogEmail with the change-of-heart summary', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    store.recordAgreement({
+      memberId: 'm1',
+      fullName: 'Member One',
+      articleId: 'art-1',
+      commentId: 'c-old',
+      commentedAt: 1,
+      source: 'email',
+    });
+
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+      sendRunLogEmail,
+      auditAgreementsArticles: [
+        {
+          articleId: 'art-1',
+          spaceId: 'space-1',
+          title: 'The Agreement',
+          url: 'https://emergent-commons.mn.co/posts/art-1',
+        },
+      ],
+      auditAgreementsLoadAndScrape: async () => [],
+    });
+
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/audit-agreements').send({});
+      expect(res.status).toBe(200);
+      expect(sendRunLogEmail).toHaveBeenCalledTimes(1);
+      const payload = sendRunLogEmail.mock.calls[0]![0]!;
+      expect(payload.taskName).toMatch(/auditAgreements/i);
+      expect(payload.outcome).toBe('success');
+      expect(payload.summary).toMatch(/anomaly|anomalies/);
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // resolveAuditCronExpr (Stage 4e default-ON policy)
+  // -------------------------------------------------------------------------
+
+  describe('resolveAuditCronExpr', () => {
+    it('returns the default daily 3am expression when the env var is unset', () => {
+      expect(resolveAuditCronExpr(undefined)).toBe('0 3 * * *');
+    });
+
+    it('returns the default expression when the env var is empty / whitespace', () => {
+      expect(resolveAuditCronExpr('')).toBe('0 3 * * *');
+      expect(resolveAuditCronExpr('   ')).toBe('0 3 * * *');
+    });
+
+    it('returns null only for explicit opt-out values (case-insensitive)', () => {
+      for (const v of ['off', 'OFF', 'Off', 'disabled', 'false', 'no', '0']) {
+        expect(resolveAuditCronExpr(v)).toBeNull();
+      }
+    });
+
+    it('treats any other non-empty value as a literal cron expression', () => {
+      expect(resolveAuditCronExpr('15 4 * * *')).toBe('15 4 * * *');
+      expect(resolveAuditCronExpr('  */30 * * * *  ')).toBe('*/30 * * * *');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // resolveReconcileCronExpr (default-OFF; same off-sentinels as the audit)
+  // -------------------------------------------------------------------------
+
+  describe('resolveReconcileCronExpr', () => {
+    /* This resolver started life as a one-line truthy check, which broke the
+     * server on startup when an operator set RECONCILE_COMMONS_CRON=off
+     * (the literal string "off" was handed to node-cron). It now uses the
+     * same off-sentinel set as the audit cron so a single mental model
+     * applies to every cron env var in this codebase. */
+    it('returns null when unset / empty / whitespace (opt-in: default OFF)', () => {
+      expect(resolveReconcileCronExpr(undefined)).toBeNull();
+      expect(resolveReconcileCronExpr('')).toBeNull();
+      expect(resolveReconcileCronExpr('   ')).toBeNull();
+    });
+
+    it('returns null for the off-sentinel set (case-insensitive)', () => {
+      for (const v of ['off', 'OFF', 'Off', 'disabled', 'false', 'no', '0']) {
+        expect(resolveReconcileCronExpr(v)).toBeNull();
+      }
+    });
+
+    it('treats any other non-empty value as a literal cron expression', () => {
+      expect(resolveReconcileCronExpr('30 2 * * *')).toBe('30 2 * * *');
+      expect(resolveReconcileCronExpr('  */15 * * * *  ')).toBe('*/15 * * * *');
+    });
   });
 
   // -------------------------------------------------------------------------

@@ -96,4 +96,56 @@ describe('sendRunLogEmail', () => {
     expect(sendArgs.text).toContain('line 2');
     expect(sendArgs.text).toContain('SUCCESS');
   });
+
+  it('omits the html field when no htmlBody is provided (default text-only path)', async () => {
+    setProductionSmtpEnv();
+
+    const { sendRunLogEmail } = await import('../src/email.js');
+    await sendRunLogEmail(samplePayload);
+
+    const sendArgs = sendMail.mock.calls[0][0] as Record<string, unknown>;
+    expect(sendArgs.text).toBeTypeOf('string');
+    expect(sendArgs.html).toBeUndefined();
+  });
+
+  it('forwards an html multipart when htmlBody is provided, alongside the text part', async () => {
+    setProductionSmtpEnv();
+
+    const { sendRunLogEmail } = await import('../src/email.js');
+    await sendRunLogEmail({
+      ...samplePayload,
+      htmlBody: '<ul><li><a href="https://example.test/u/1">Alice</a></li></ul>',
+    });
+
+    const sendArgs = sendMail.mock.calls[0][0] as { text: string; html: string };
+    expect(sendArgs.text).toContain('SUCCESS');
+    expect(sendArgs.html).toBeTypeOf('string');
+    /* The generated HTML must keep the job-supplied fragment intact (anchors
+     * survive escaping) AND wrap it in a standard envelope so the email is a
+     * valid HTML doc with the same header info as the text body. */
+    expect(sendArgs.html).toContain(
+      '<a href="https://example.test/u/1">Alice</a>',
+    );
+    expect(sendArgs.html).toContain('removeSpaceMembers');
+    expect(sendArgs.html).toContain('3 removed');
+  });
+
+  it('escapes header / log fields injected into the html envelope to avoid breaking markup', async () => {
+    setProductionSmtpEnv();
+
+    const { sendRunLogEmail } = await import('../src/email.js');
+    await sendRunLogEmail({
+      ...samplePayload,
+      taskName: 'task <x> & co',
+      logLines: ['log <a> & b'],
+      htmlBody: '<p>ok</p>',
+    });
+
+    const sendArgs = sendMail.mock.calls[0][0] as { html: string };
+    expect(sendArgs.html).toContain('task &lt;x&gt; &amp; co');
+    expect(sendArgs.html).toContain('log &lt;a&gt; &amp; b');
+    /* The trusted htmlBody fragment must NOT be escaped — it's the whole
+     * point of the API. The job is responsible for escaping its own inputs. */
+    expect(sendArgs.html).toContain('<p>ok</p>');
+  });
 });

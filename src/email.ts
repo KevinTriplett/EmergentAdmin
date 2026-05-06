@@ -15,6 +15,16 @@ export type RunLogEmailPayload = {
   summary: string;
   logLines: readonly string[];
   result: unknown;
+  /**
+   * Optional HTML *fragment* (NOT a full document) inserted between the
+   * email envelope's header and the log section. Trusted — passed through
+   * verbatim. The job that produces it is responsible for escaping any
+   * untrusted input it interpolates (member names, comment text, etc.)
+   * before stitching the fragment together. When undefined, the email is
+   * sent as plain-text only (preserves existing behavior for tasks that
+   * don't opt in).
+   */
+  htmlBody?: string;
 };
 
 type SmtpConfig = {
@@ -66,6 +76,59 @@ function formatBody(payload: RunLogEmailPayload): string {
   return `${header}\n\n--- Log ---\n${log}\n\n--- Result ---\n${result}\n`;
 }
 
+/** Minimal HTML escape for caller-controlled strings interpolated into the envelope. */
+export function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Compose the HTML email body. Header / log / result fields are escaped;
+ * the job-supplied `htmlBody` fragment is trusted and inlined verbatim.
+ * Returns a complete `<html>…</html>` document so SMTP servers don't have
+ * to wrap it themselves.
+ */
+function formatHtmlBody(payload: RunLogEmailPayload): string {
+  const ts = new Date().toISOString();
+  const headerHtml = `
+    <p style="font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:14px">
+      <strong>Task:</strong> ${escapeHtml(payload.taskName)}<br>
+      <strong>Outcome:</strong> ${escapeHtml(payload.outcome.toUpperCase())}<br>
+      <strong>Summary:</strong> ${escapeHtml(payload.summary)}<br>
+      <strong>Timestamp:</strong> ${escapeHtml(ts)}
+    </p>`;
+
+  const main = payload.htmlBody ?? '';
+
+  const logHtml = payload.logLines.length > 0
+    ? `<pre style="font-size:12px;white-space:pre-wrap">${escapeHtml(
+        payload.logLines.join('\n'),
+      )}</pre>`
+    : '<p>(no log lines)</p>';
+
+  const resultStr = (() => {
+    try {
+      return JSON.stringify(payload.result, null, 2);
+    } catch {
+      return String(payload.result);
+    }
+  })();
+  const resultHtml = `<pre style="font-size:12px;white-space:pre-wrap">${escapeHtml(resultStr)}</pre>`;
+
+  return `<!doctype html><html><body>
+    ${headerHtml}
+    ${main}
+    <h3>Log</h3>
+    ${logHtml}
+    <h3>Result</h3>
+    ${resultHtml}
+  </body></html>`;
+}
+
 /**
  * Send an end-of-run log email to `ADMIN_EMAILS`.
  *
@@ -95,10 +158,14 @@ export async function sendRunLogEmail(payload: RunLogEmailPayload): Promise<void
 
   const subject = `[MN Host Automator] ${payload.taskName} — ${payload.summary}`;
 
+  /* Always send plain text. When the job opts in via `htmlBody`, also send
+   * an HTML alternative — nodemailer composes a multipart/alternative
+   * envelope and recipients see whichever their client prefers. */
   await transporter.sendMail({
     from: smtp.from,
     to: ADMIN_EMAILS.join(', '),
     subject,
     text: formatBody(payload),
+    ...(payload.htmlBody !== undefined ? { html: formatHtmlBody(payload) } : {}),
   });
 }

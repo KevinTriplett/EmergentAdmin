@@ -42,6 +42,15 @@ export type SchedulerJob<T> = {
   headless: boolean;
   run: (ctx: BrowserJobContext) => Promise<T>;
   summarize: (result: T) => string;
+  /**
+   * Optional HTML *fragment* derived from the success-path result, forwarded
+   * to `sendRunLogEmail` so admin emails can render rich content (e.g. the
+   * change-of-heart audit's anomaly list with member-link anchors). Called
+   * only on success; never on the error path. If this function throws we
+   * log + drop the HTML and still send the plain-text email — losing the
+   * HTML alternative is preferable to losing the whole notification.
+   */
+  htmlBody?: (result: T) => string;
 };
 
 export type SchedulerDeps = {
@@ -99,6 +108,7 @@ export function createTaskScheduler(deps: SchedulerDeps): TaskScheduler {
     let outcome: RunLogOutcome = 'success';
     let summary = 'completed';
     let emailResult: unknown = null;
+    let emailHtmlBody: string | undefined;
     let caught: unknown = null;
     let result: T | undefined;
 
@@ -113,6 +123,17 @@ export function createTaskScheduler(deps: SchedulerDeps): TaskScheduler {
       result = await job.run({ page, log, abortSignal, sleep: deps.sleep });
       summary = job.summarize(result);
       emailResult = result;
+      if (job.htmlBody) {
+        try {
+          emailHtmlBody = job.htmlBody(result);
+        } catch (e) {
+          /* A bug in the HTML renderer must not break the email. We lose the
+           * HTML alternative; the text body still goes out with the full
+           * log + result so the admin still sees what happened. */
+          console.warn(`htmlBody() threw for "${job.name}":`, e);
+          emailHtmlBody = undefined;
+        }
+      }
       deps.broadcast({ type: 'done', result });
     } catch (err) {
       caught = err;
@@ -138,6 +159,7 @@ export function createTaskScheduler(deps: SchedulerDeps): TaskScheduler {
           summary,
           logLines: logLines.slice(),
           result: emailResult,
+          ...(emailHtmlBody !== undefined ? { htmlBody: emailHtmlBody } : {}),
         })
         .catch((e) => {
           console.warn(`sendRunLogEmail failed for "${job.name}":`, e);

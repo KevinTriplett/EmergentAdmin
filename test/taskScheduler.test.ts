@@ -105,6 +105,69 @@ describe('taskScheduler', () => {
     expect(payload.logLines).toEqual(['line A', 'line B']);
   });
 
+  it('forwards htmlBody(result) to sendRunLogEmail when the job opts in (success path)', async () => {
+    const { scheduler, sendRunLogEmail } = newScheduler();
+    const job: SchedulerJob<{ n: number }> = {
+      name: 'html-task',
+      headless: true,
+      run: async () => ({ n: 7 }),
+      summarize: () => 'ok',
+      htmlBody: (r) => `<p>n=${r.n}</p>`,
+    };
+
+    await scheduler.runNow(job);
+
+    await expect.poll(() => sendRunLogEmail.mock.calls.length).toBeGreaterThan(0);
+    expect(sendRunLogEmail.mock.calls[0][0].htmlBody).toBe('<p>n=7</p>');
+  });
+
+  it('omits htmlBody for jobs that do not opt in (default path stays plain text)', async () => {
+    const { scheduler, sendRunLogEmail } = newScheduler();
+    await scheduler.runNow(buildJob('plain-task', async () => 1, () => 'ok'));
+    await expect.poll(() => sendRunLogEmail.mock.calls.length).toBeGreaterThan(0);
+    expect(sendRunLogEmail.mock.calls[0][0].htmlBody).toBeUndefined();
+  });
+
+  it('omits htmlBody on error paths even when the job defines one (no result to render)', async () => {
+    const { scheduler, sendRunLogEmail } = newScheduler();
+    const job: SchedulerJob<number> = {
+      name: 'html-error-task',
+      headless: true,
+      run: async () => {
+        throw new Error('nope');
+      },
+      summarize: () => 'never',
+      htmlBody: () => '<p>should not be called</p>',
+    };
+
+    await expect(scheduler.runNow(job)).rejects.toThrow('nope');
+    await expect.poll(() => sendRunLogEmail.mock.calls.length).toBeGreaterThan(0);
+    const payload = sendRunLogEmail.mock.calls[0][0];
+    expect(payload.outcome).toBe('error');
+    expect(payload.htmlBody).toBeUndefined();
+  });
+
+  it('drops the htmlBody and logs a warning if the job\'s htmlBody throws (does not break email)', async () => {
+    const { scheduler, sendRunLogEmail } = newScheduler();
+    const job: SchedulerJob<number> = {
+      name: 'html-throw-task',
+      headless: true,
+      run: async () => 1,
+      summarize: () => 'ok',
+      htmlBody: () => {
+        throw new Error('render bug');
+      },
+    };
+
+    await scheduler.runNow(job);
+    await expect.poll(() => sendRunLogEmail.mock.calls.length).toBeGreaterThan(0);
+    /* The job still succeeds and the text email still goes out; we just
+     * don't get an html part. The alternative — letting an htmlBody bug
+     * abort the email entirely — would lose the log lines we *do* have. */
+    expect(sendRunLogEmail.mock.calls[0][0].outcome).toBe('success');
+    expect(sendRunLogEmail.mock.calls[0][0].htmlBody).toBeUndefined();
+  });
+
   it('calls sendRunLogEmail with error outcome when the job throws', async () => {
     const { scheduler, sendRunLogEmail } = newScheduler();
     await expect(

@@ -13,8 +13,8 @@ import {
 /**
  * The IMAP poller is the live ingestion path for Stage 4a. Every N minutes
  * it asks the mailbox for unseen messages, hands each one to the parser,
- * records valid agreements in the store, and on the 8th unique agreement
- * per member atomically claims the right to enqueue an add-all-spaces job.
+ * records valid agreements in the store, and on agreement, atomically
+ * claims the right to enqueue an add-all-spaces job.
  *
  * All IMAP interaction is funnelled through the `ImapConnection` interface
  * below so tests can swap in an in-memory mailbox. The real wrapper lives

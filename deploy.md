@@ -8,7 +8,45 @@ This guide assumes:
 
 ---
 
+## 0. With a running server
+
+*Note: Don't start here, this is after for the server is up and running. This is only at the top so it's easy to find later*
+
+To restart with new code:
+
+```bash
+cd ~/EmergentAdmin
+npm run clean:all
+npm ci
+npm run install:browsers
+npm run build
+sudo systemctl restart emergent-admin
+sudo journalctl -u emergent-admin -n 50 --no-pager # check started error-free
+```
+
+All of the systemd commands:
+
+```bash
+sudo systemctl start emergent-admin       # start
+sudo systemctl stop emergent-admin        # stop
+sudo systemctl restart emergent-admin     # rolling restart (use after .env or build changes)
+sudo systemctl status emergent-admin      # is it running? what's the PID? recent log lines
+sudo systemctl enable emergent-admin      # auto-start on boot (one-time setup)
+sudo systemctl disable emergent-admin     # don't auto-start on boot
+sudo journalctl -u emergent-admin -f      # tail the live log
+sudo journalctl -u emergent-admin -n 100  # last 100 log lines
+```
+
 ## 1. Install Node.js via nvm
+
+> **⚠️ Bullseye ↔ Node version constraint — read this first.** The repo pins Node 22 in `.nvmrc` for a reason. Bullseye ships **glibc 2.31** and **g++ 10 / libstdc++ 10**, and that combination is too old for native modules built against Node 24 or newer:
+>
+> - `better-sqlite3`'s prebuilt `.node` binaries published for Node 24 / 25 require glibc ≥ 2.33 → install fails with `prebuild-install warn install /lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.33' not found`.
+> - The fallback source-compile fails too, because Node 24+'s V8 headers `#include <source_location>` (a C++20 stdlib header that arrived in libstdc++ 11). On Bullseye you get `fatal error: source_location: No such file or directory`.
+>
+> **On Bullseye, stick with Node 22** (current Active LTS, supported through Apr 2027) **or earlier.** If you genuinely need a newer Node line, plan to upgrade the host to **Debian 12 (Bookworm)** first — that ships glibc 2.36 / g++ 12, and both failure modes go away.
+>
+> Always run `nvm install` from inside the repo so it reads `.nvmrc`. Letting `nvm install --lts` or `nvm install node` pull the *Current* line on Bullseye will silently fetch a Node version that can't build native modules on this host.
 
 Node is managed per-user with [nvm](https://github.com/nvm-sh/nvm) so the version in the repo's `.nvmrc` is always authoritative.
 
@@ -282,12 +320,11 @@ configured space — idempotent for members already added, corrective for misses
 This uses the **same** `TaskScheduler` background queue as the IMAP poller's
 automatic adds — not a second browser runner.
 
-- **`RECONCILE_COMMONS_CRON`** — optional standard [node-cron](https://www.npmjs.com/package/node-cron) expression (trimmed env value). Example for 02:30 daily in the server's local timezone: `30 2 * * *`. Scheduled only when the agreements SQLite store opens successfully (same conditions as Stage 4a watcher data + app config).
-- **`IMAP_POLL_INTERVAL_MS`** — optional millisecond gap between inbox polls when the agreements watcher runs (default `300000`).
-- **`POST /run/reconcile-commons-membership`** — same semantics as `/run/remove-space-members`; responds with JSON `{ enqueued, members }`. Use **`curl`/CI**, or the **`Enqueue reconcile`** control in **`public/index.html`** when the agreements store is enabled.
-
-- **`GET /status/agreements`** — read-only `{ db, imap, configuredAgreementArticles }` blob for dashboards (authored primarily for **`public/index.html`**). Omit when SQLite is off (`404`).
-- **`POST /run/poll-agreements-mailbox`** — invokes one IMAP ingestion round-trip (same semantics as timer ticks); returns **`PollResult` JSON**. Returns **`404`** if the watcher hook is absent (manual Node tests / dev stubs).
+- `**RECONCILE_COMMONS_CRON`** — optional standard [node-cron](https://www.npmjs.com/package/node-cron) expression (trimmed env value). Example for 02:30 daily in the server's local timezone: `30 2 * * *`. Scheduled only when the agreements SQLite store opens successfully (same conditions as Stage 4a watcher data + app config).
+- `**IMAP_POLL_INTERVAL_MS**` — optional millisecond gap between inbox polls when the agreements watcher runs (default `300000`).
+- `**POST /run/reconcile-commons-membership**` — same semantics as `/run/remove-space-members`; responds with JSON `{ enqueued, members }`. Use `**curl`/CI**, or the `**Enqueue reconcile`** control in `**public/index.html**` when the agreements store is enabled.
+- `**GET /status/agreements**` — read-only `{ db, imap, configuredAgreementArticles }` blob for dashboards (authored primarily for `**public/index.html**`). Omit when SQLite is off (`404`).
+- `**POST /run/poll-agreements-mailbox**` — invokes one IMAP ingestion round-trip (same semantics as timer ticks); returns `**PollResult` JSON**. Returns `**404`** if the watcher hook is absent (manual Node tests / dev stubs).
 Restart the unit after editing `.env` so cron registration picks up schedule changes.
 
 ## 5.3 Verifying the Agreements Watcher
@@ -420,23 +457,16 @@ Once Tests 1–6 are green, do the production rehearsal:
 1. Create a throwaway MN member account (or use a coworker's test account).
 2. Have them post `I agree` on the agreement article.
 3. Wait for the email to land in the receiving Gmail (verify via Gmail's
-   web UI).
+  web UI).
 4. Within a poll cycle (≤ 60 s after delivery), check:
-
-   ```bash
+  ```bash
    sqlite3 /home/deploy/EmergentAdmin/data/ec-admin.db \
      "SELECT m.full_name, a.article_id, a.commented_at FROM agreements a
       JOIN members m ON a.member_id = m.member_id
       ORDER BY a.commented_at DESC LIMIT 5;"
-   ```
-
+  ```
 5. The same row that lands in `agreements` is also the threshold trigger
-   (currently `REQUIRED_AGREEMENT_COUNT = 1`), so the journal should show:
-
-   ```
-   [imap] imapPoller: member <full name> (<id>) reached required agreements - add-all-spaces enqueued
-   ```
-
+  (currently `REQUIRED_AGREEMENT_COUNT = 1`), so the journal should show:
    followed shortly after by the usual `═══ Adding to space: ... ═══` log
    lines from the auto-triggered add-all-spaces job. Verify on MN that the
    member now appears in all spaces.
@@ -516,13 +546,14 @@ EOF
 
 > **Note:** Adjust `User`, `WorkingDirectory`, and the `NVM_DIR` path if you're not using the `deploy` user. The `exec` in `ExecStart` is important — it replaces the bash wrapper with the node process so systemd can track the real PID and forward signals correctly.
 >
-> **Alternative (pinned path):** If you'd rather not involve bash at all, run `which node` after `nvm use` and hard-code it:
+> **⚠️ Do NOT hard-code the Node binary path in `ExecStart`.** It's tempting to skip the bash wrapper for a "simpler, marginally faster" unit:
 >
 > ```ini
-> ExecStart=/home/deploy/.nvm/versions/node/v20.18.1/bin/node dist/server.js
+> # ANTI-PATTERN — don't do this:
+> ExecStart=/home/deploy/.nvm/versions/node/v22.22.2/bin/node dist/server.js
 > ```
 >
-> This is marginally faster to start but you'll need to update the unit file every time `.nvmrc` changes.
+> The moment `.nvmrc` is bumped (or a `nvm install` resolves to a newer 22.x.y patch and the old version is later removed), the unit silently keeps launching the now-stale or now-deleted binary. The most painful failure mode is when the old Node binary is *still present*: the service starts cleanly with the wrong Node, then crashes on first SQLite open with `ERR_DLOPEN_FAILED` and `NODE_MODULE_VERSION` mismatch — because `npm ci` rebuilt `better-sqlite3` against the *new* Node ABI but systemd is still launching the *old* one. The wrapper above tracks `.nvmrc` automatically and avoids this trap entirely; pay the millisecond of bash startup, every time.
 
 Enable and start:
 
@@ -699,32 +730,61 @@ The next run will execute the full login flow and rebuild the profile bound to t
 
 ### Service starts with the wrong Node version
 
-Symptom: `systemctl status emergent-admin` shows the service running, but it's using the system-wide Node (e.g. v24) instead of the version in `.nvmrc`, causing crashes or native-module errors.
+Symptom: the journal shows `Node.js v20.x.x` (or some other version) when `.nvmrc` says `v22`, and on first SQLite open you see:
 
-Cause: systemd does not source your shell, so `nvm` isn't on `PATH` unless the unit explicitly loads it. If `ExecStart` points at `/usr/bin/node` or a bare `node`, you get whatever happens to be globally installed.
-
-Fix: use the `bash -lc` wrapper from section 6, or hard-code the absolute path to the nvm-managed binary:
-
-```bash
-# As the deploy user:
-cd ~/EmergentAdmin
-nvm use
-which node            # copy this path into ExecStart=
+```
+Error: The module '.../better-sqlite3/build/Release/better_sqlite3.node'
+was compiled against a different Node.js version using
+NODE_MODULE_VERSION 127. This version of Node.js requires
+NODE_MODULE_VERSION 115.
+code: 'ERR_DLOPEN_FAILED'
 ```
 
-After editing the unit:
+(`127` = Node 22 ABI, `115` = Node 20 ABI; whatever pair you see, the build artifact and the runtime are from different Node majors.)
+
+Cause: most often, `ExecStart` is hard-coded to a specific Node binary (see the warning in section 6) — so `.nvmrc`, `nvm use`, and `nvm alias default` are all bypassed. systemd happily launches whatever binary is at that literal path, and `nvm use --silent` either isn't running at all or runs but is overridden. Less common: the unit *does* use the wrapper, but `User=`/`HOME=` aren't right and `$HOME/.nvm` resolves wrong inside the subshell.
+
+Diagnose in this order (run as the deploy user where indicated):
 
 ```bash
+# 1. What is systemd actually running? Look at the ExecStart= line.
+systemctl cat emergent-admin
+
+# 2. Sanity-check that the wrapper itself resolves to the expected version.
+bash -lc 'export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" \
+  && cd /home/deploy/EmergentAdmin && nvm use --silent && node -v'
+# Should match .nvmrc, e.g. v22.22.2
+
+# 3. What's nvm's default alias?
+nvm alias default
+nvm ls
+```
+
+Fix: switch the unit back to the wrapper form (section 6). **Do not "fix" this by hard-coding a different path** — that just defers the same crash to the next Node bump.
+
+```bash
+sudo systemctl edit --full emergent-admin
+# Replace the ExecStart= line with:
+#   ExecStart=/bin/bash -lc 'export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use --silent && exec node dist/server.js'
 sudo systemctl daemon-reload
 sudo systemctl restart emergent-admin
 sudo journalctl -u emergent-admin -n 50 --no-pager
 ```
 
-Confirm the right version is running:
+Confirm the right binary is running:
 
 ```bash
 sudo systemctl status emergent-admin   # note the PID
-sudo readlink -f /proc/<PID>/exe        # should point into ~/.nvm/versions/node/...
+sudo readlink -f /proc/<PID>/exe       # should point into ~/.nvm/versions/node/v22.x.x/...
+```
+
+If the wrapper resolves correctly in your interactive shell but systemd is still launching the wrong version, the unit is missing `Environment=HOME=/home/deploy` (systemd doesn't inherit your interactive `$HOME`, and `bash -lc` would resolve `$HOME/.nvm` to `/.nvm`, which doesn't exist — so `nvm use --silent` no-ops to whatever Node was already on the system `PATH`):
+
+```bash
+sudo systemctl show emergent-admin -p User -p Environment
+# Should include HOME=/home/deploy.  If not, add it via `systemctl edit`:
+#   [Service]
+#   Environment=HOME=/home/deploy
 ```
 
 ### WebSocket disconnects immediately
@@ -742,7 +802,7 @@ gates in order:
    sudo systemctl show emergent-admin -p Environment
    # Should include: NODE_ENV=production
   ```
-2. **All five `SMTP_`* vars must be set.** `dotenv` loads `.env` at process
+2. *All five `SMTP_` vars must be set.** `dotenv` loads `.env` at process
   start, so a typo or missing var silently disables sending. Quick check:
    Restart the service after edits — `.env` is only read at startup.
 3. **Look for a send failure.** If sending was attempted but rejected by the

@@ -70,20 +70,40 @@ same `TaskScheduler` as IMAP. Optional `RECONCILE_COMMONS_CRON`; manual
 
 **Stage 4f overlay (verified-added flag):**
 - `members.commons_added_at INTEGER NULL` — set by `addToAllSpacesJob`
-  itself when a run completes with `failureCount === 0` (every space
-  added cleanly OR was already-member). Independent of the
-  `members.added_at` dedup gate, which still guards the IMAP poller's
-  one-shot enqueue.
-- Reconcile scope env var `RECONCILE_COMMONS_SCOPE`. Default
-  (unset / any other value) = re-run for every eligible member;
-  catches drift via idempotent repair. Set to `not-yet-added` to
-  trim the queue to members whose `commons_added_at IS NULL` —
-  faster runs, but trusts the verified-added flag as ground truth.
+  itself when every configured space is Phase-1-verified present (see
+  Stage 4g). Independent of the `members.added_at` dedup gate, which
+  still guards the IMAP poller's one-shot enqueue.
 - Dashboard list **"Eligible, not yet added to Commons"** uses
   `eligibleNotYetAddedMembers` from the overview; counter
   **"Members verified added to all Commons spaces"** uses
-  `commonsAddedMemberCount` (now counting `commons_added_at IS NOT NULL`,
+  `commonsAddedMemberCount` (counts `commons_added_at IS NOT NULL`,
   not the old dedup-gate semantic).
+
+**Stage 4g overlay (consent gate: "added once, never again"):**
+- New table `member_space_attempts(member_id, space_name, outcome,
+  attempted_at, last_error)` with `outcome IN ('present','failed')`.
+- `'present'` is written ONLY when `addSpaceMember` returns
+  `success: true, error: ALREADY_A_MEMBER` — i.e. its Phase-1 search
+  found the member's row in the space's filtered member list. Phase-2
+  successes (the "Add to spaces" toast appeared, but no independent
+  search ran) write nothing; the next reconcile pass Phase-1-verifies
+  and records on that pass instead.
+- `addToAllSpacesJob` consults the ledger before each iteration and
+  skips spaces whose row is `'present'`. That's the consent guarantee:
+  once we've added a member to a space, we never add them again, even
+  if they later leave it. `commons_added_at` flips when every space is
+  Phase-1-verified (skipped pre-loop OR `ALREADY_A_MEMBER` this run).
+- `'failed'` rows are informational; reconcile retries them on the
+  next pass. They never overwrite a `'present'` row, and they age out
+  after 30 days (see `pruneFailedSpaceAttempts`, called at the start
+  of every reconcile run with a 30-day cutoff — no separate cron).
+- Reconcile scope is fixed to `commons_added_at IS NULL` (the old
+  `RECONCILE_COMMONS_SCOPE` env var was removed; there's only one
+  correct behavior under the consent guarantee).
+- Manual `/run/add-space-member-all-spaces` accepts `force: true` in
+  the body to bypass the pre-loop skip — the operator override path
+  for "the member explicitly asked to be re-added to a space they
+  left". Default `false` so a casual click never violates the gate.
 
 ### Stage 4d: Admin UI -- DONE
 

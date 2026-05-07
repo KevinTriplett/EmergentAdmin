@@ -16,6 +16,7 @@ To restart with new code:
 
 ```bash
 cd ~/EmergentAdmin
+git pull origin
 npm run clean:all
 npm ci
 npm run install:browsers
@@ -37,9 +38,21 @@ sudo journalctl -u emergent-admin -f      # tail the live log
 sudo journalctl -u emergent-admin -n 100  # last 100 log lines
 ```
 
+To rotate the http basic auth password later, omit `-c` (otherwise the file is recreated and any other entries are wiped):
+
+```bash
+sudo htpasswd -B /etc/nginx/.htpasswd-emergent-admin admin
+```
+
+If the Node version changes or a NODE_MODULE_VERSION mismatch is reported, do:
+
+```bash
+npm rebuild better-sqlite3
+```
+
 ## 1. Install Node.js via nvm
 
-> **⚠️ Bullseye ↔ Node version constraint — read this first.** The repo pins Node 22 in `.nvmrc` for a reason. Bullseye ships **glibc 2.31** and **g++ 10 / libstdc++ 10**, and that combination is too old for native modules built against Node 24 or newer:
+> **⚠️ Bullseye ↔ Node version constraint — read this first.** The repo pins Node 22 in `.nvmrc` for a reason. Bullseye ships **glibc 2.31** and **g++10 / libstdc++ 10**, and that combination is too old for native modules built against Node 24 or newer:
 >
 > - `better-sqlite3`'s prebuilt `.node` binaries published for Node 24 / 25 require glibc ≥ 2.33 → install fails with `prebuild-install warn install /lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.33' not found`.
 > - The fallback source-compile fails too, because Node 24+'s V8 headers `#include <source_location>` (a C++20 stdlib header that arrived in libstdc++ 11). On Bullseye you get `fatal error: source_location: No such file or directory`.
@@ -308,21 +321,33 @@ If that post is ever republished or migrated, update both `articleId` and
 a real MN post, the poller will skip every incoming comment as the safe
 failure mode.
 
-### Commons membership reconcile (Stage 4c)
+### Commons membership reconcile (Stage 4c, consent gate added in 4g)
 
 When agreements are persisted in SQLite, you can periodically **repair commons
 membership**: for every member whose distinct agreement article count meets
 the threshold (`AGREEMENT_ARTICLES.length` → `REQUIRED_AGREEMENT_COUNT` in
 `src/config/agreements.ts`, threaded into SQLite via `openAgreementsStore`),
-the server enqueues one background `add-member-to-all-spaces` job. That reruns Puppeteer membership against every
-configured space — idempotent for members already added, corrective for misses.
+the server enqueues one background `add-member-to-all-spaces` job.
+
+**Consent gate (Stage 4g):** members whose `commons_added_at` is set are
+skipped entirely — once the system has verified a member into every space,
+it will never re-add them, even if they later leave a space. Inside each
+job, the per-(member, space) attempt ledger (`member_space_attempts`)
+similarly skips any space already marked `'present'`. A space is marked
+`'present'` only when `addSpaceMember`'s Phase-1 search independently
+confirms the member is in that space; the add-flow's success toast is
+not trusted on its own. So a fully-new member typically needs two
+reconcile passes to be retired: one to add, one to verify-and-record.
+
+Failed attempt rows (`outcome = 'failed'`) age out after 30 days; reconcile
+prunes them at the start of each pass with no separate cron required.
 
 This uses the **same** `TaskScheduler` background queue as the IMAP poller's
 automatic adds — not a second browser runner.
 
 - `**RECONCILE_COMMONS_CRON`** — optional standard [node-cron](https://www.npmjs.com/package/node-cron) expression (trimmed env value). Example for 02:30 daily in the server's local timezone: `30 2 * * *`. Scheduled only when the agreements SQLite store opens successfully (same conditions as Stage 4a watcher data + app config).
-- `**IMAP_POLL_INTERVAL_MS**` — optional millisecond gap between inbox polls when the agreements watcher runs (default `300000`).
-- `**POST /run/reconcile-commons-membership**` — same semantics as `/run/remove-space-members`; responds with JSON `{ enqueued, members }`. Use `**curl`/CI**, or the `**Enqueue reconcile`** control in `**public/index.html**` when the agreements store is enabled.
+- `**IMAP_POLL_INTERVAL_MS`** — optional millisecond gap between inbox polls when the agreements watcher runs (default `300000`).
+- `**POST /run/reconcile-commons-membership**` — same semantics as `/run/remove-space-members`; responds with JSON `{ enqueued, members }`. Use `**curl`/CI**, or the `**Enqueue reconcile`** control in `**public/index.html`** when the agreements store is enabled.
 - `**GET /status/agreements**` — read-only `{ db, imap, configuredAgreementArticles }` blob for dashboards (authored primarily for `**public/index.html**`). Omit when SQLite is off (`404`).
 - `**POST /run/poll-agreements-mailbox**` — invokes one IMAP ingestion round-trip (same semantics as timer ticks); returns `**PollResult` JSON**. Returns `**404`** if the watcher hook is absent (manual Node tests / dev stubs).
 Restart the unit after editing `.env` so cron registration picks up schedule changes.
@@ -371,7 +396,7 @@ Confirm the SQLite file was created on first boot:
 
 ```bash
 sqlite3 /home/deploy/EmergentAdmin/data/ec-admin.db ".tables"
-# expect: agreements  dms_sent  members  processed_emails
+# expect: agreements  dms_sent  members  member_space_attempts  processed_emails
 
 sqlite3 /home/deploy/EmergentAdmin/data/ec-admin.db \
   "SELECT count(*) FROM processed_emails;"
@@ -514,9 +539,24 @@ sqlite3 /home/deploy/EmergentAdmin/data/ec-admin.db \
 # Per-member agreement progress
 sqlite3 /home/deploy/EmergentAdmin/data/ec-admin.db \
   "SELECT m.full_name, m.member_id, count(a.article_id) AS agreements,
-          datetime(m.added_at/1000,'unixepoch','localtime') AS added
+          datetime(m.added_at/1000,'unixepoch','localtime') AS added,
+          datetime(m.commons_added_at/1000,'unixepoch','localtime') AS verified
    FROM members m LEFT JOIN agreements a ON a.member_id = m.member_id
    GROUP BY m.member_id ORDER BY agreements DESC, m.full_name;"
+
+# Per-(member, space) attempt ledger (Stage 4g consent gate)
+sqlite3 /home/deploy/EmergentAdmin/data/ec-admin.db \
+  "SELECT m.full_name, a.space_name, a.outcome,
+          datetime(a.attempted_at/1000,'unixepoch','localtime') AS attempted,
+          a.last_error
+   FROM member_space_attempts a JOIN members m ON m.member_id = a.member_id
+   ORDER BY m.full_name, a.space_name;"
+
+# How many failed rows per space (live triage of a flaky space)
+sqlite3 /home/deploy/EmergentAdmin/data/ec-admin.db \
+  "SELECT space_name, count(*) AS failed_count
+   FROM member_space_attempts WHERE outcome = 'failed'
+   GROUP BY space_name ORDER BY failed_count DESC;"
 ```
 
 ## 6. Create systemd service
@@ -618,7 +658,7 @@ sudo systemctl reload nginx
 The dashboard exposes destructive endpoints (mass-add to spaces, mass-remove, audit, abort) and a live-log WebSocket. Without auth, anyone who guesses the subdomain can disrupt the community. Gate everything at nginx so the Node app is never reachable from the public internet without credentials.
 
 > **Why nginx, not the Node app?**
-> The dashboard's WebSocket (live logs + Abort) lives on the same vhost. Putting auth at nginx covers the UI, every `POST /run/*`, and the WS upgrade in one shot, with zero application-side code to maintain. It also leaves the door open to swap in OAuth proxy / SSO / IP allowlist later without touching the app.
+> The dashboard's WebSocket (live logs + Abort) lives on the same vhost. Putting auth at nginx covers the UI, every `POST /run/`*, and the WS upgrade in one shot, with zero application-side code to maintain. It also leaves the door open to swap in OAuth proxy / SSO / IP allowlist later without touching the app.
 
 > **Apply this BEFORE running certbot in §8.** When certbot rewrites the file to add the `server { listen 443 ssl; ... }` block, it copies the existing `location /` directives — including `auth_basic` — into the new block automatically. If you already ran certbot, see "Retrofitting on an already-TLS'd vhost" below.
 
@@ -722,9 +762,9 @@ If certbot has already rewritten the file, it now contains both a `server { list
 
 ### What this does *not* protect against
 
-- **`localhost:3000` on the box itself.** Anyone with shell on the server can `curl localhost:3000/run/...` directly, bypassing nginx. That's an inherent property of any nginx-layer auth; the mitigation is keeping shell access tight (already the case via the `deploy` user and SSH keys).
+- `**localhost:3000` on the box itself.** Anyone with shell on the server can `curl localhost:3000/run/...` directly, bypassing nginx. That's an inherent property of any nginx-layer auth; the mitigation is keeping shell access tight (already the case via the `deploy` user and SSH keys).
 - **Cron jobs.** They run *inside* the Node process, never go through HTTP, so they're unaffected by auth — which is exactly what we want.
-- **CSRF from a malicious site you've visited in another tab while authenticated.** The current `/run/*` endpoints accept `Content-Type: application/json` POSTs, which the browser treats as non-simple and gates behind a CORS preflight; the Node app sends no CORS headers, so the preflight fails and the cross-origin POST never lands. This is a happy accident, not a deliberate defence — if `/run/*` is ever changed to accept form-encoded POSTs, add explicit CSRF protection at the same time.
+- **CSRF from a malicious site you've visited in another tab while authenticated.** The current `/run/`* endpoints accept `Content-Type: application/json` POSTs, which the browser treats as non-simple and gates behind a CORS preflight; the Node app sends no CORS headers, so the preflight fails and the cross-origin POST never lands. This is a happy accident, not a deliberate defence — if `/run/*` is ever changed to accept form-encoded POSTs, add explicit CSRF protection at the same time.
 
 ## 8. SSL with Let's Encrypt
 

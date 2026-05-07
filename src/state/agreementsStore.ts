@@ -21,6 +21,38 @@ import path from 'node:path';
 export type AgreementSource = 'email' | 'reconciliation';
 
 /**
+ * Stage 4g per-(member, space) attempt ledger.
+ *
+ *   present - The member has been INDEPENDENTLY CONFIRMED to be in the
+ *             space, by an `addSpaceMember` Phase-1 search returning
+ *             `ALREADY_A_MEMBER` (i.e. the space's filtered member list
+ *             contains a row matching `data-member-item='${memberId}'`).
+ *             Once written, the row is permanent for the auto path:
+ *             reconcile and the all-spaces job will never touch this
+ *             pair again, even if the member later leaves the space.
+ *             That's the consent guarantee — "added once, never again".
+ *
+ *   failed  - The most recent attempt to add this pair raised an error.
+ *             Informational; subsequent passes retry. Replaced by
+ *             'present' on the next Phase-1-verified hit, or aged out
+ *             after `FAILED_ATTEMPT_TTL_MS` of no further activity.
+ *
+ * Phase-2-only successes (the add-flow's toast appeared but no
+ * independent search ran) are deliberately NOT persisted: they require
+ * a follow-up reconcile pass to be Phase-1-verified before the row
+ * lands. That extra pass is the price of "trust nothing but the
+ * verification search" — see `addToAllSpacesJob` for why.
+ */
+export type SpaceAttemptOutcome = 'present' | 'failed';
+
+export type MemberSpaceAttempt = {
+  spaceName: string;
+  outcome: SpaceAttemptOutcome;
+  attemptedAt: number;
+  lastError: string | null;
+};
+
+/**
  * Stage 4e change-of-heart audit verdict for one (member, article) pair.
  *
  *   happy            - exactly one current comment, matches AGREE_PATTERN.
@@ -139,6 +171,45 @@ export interface AgreementsStore {
   markCommonsAdded(memberId: string, when?: number): void;
   /** Stage 4f: read back whether the member has been verified-added. */
   isCommonsAdded(memberId: string): boolean;
+
+  // ---- Stage 4g: per-(member, space) attempt ledger ------------------------
+  /**
+   * Stage 4g: persist a Phase-1-verified presence claim. Called by the
+   * all-spaces job exactly when `addSpaceMember` returns
+   * `success: true, error: ALREADY_A_MEMBER` — i.e. the member's row was
+   * found in the space's filtered member list. Idempotent: re-recording
+   * just bumps `attempted_at`. Transitions an existing 'failed' row to
+   * 'present' and clears `last_error`.
+   */
+  recordSpacePresent(memberId: string, spaceName: string, when?: number): void;
+  /**
+   * Stage 4g: persist a failed add attempt. Caller passes the error
+   * message verbatim into `last_error`. Will NOT overwrite an existing
+   * 'present' row (verified presence is permanent on the auto path);
+   * any other state is upserted with the new `attempted_at`.
+   */
+  recordSpaceFailed(
+    memberId: string,
+    spaceName: string,
+    error?: string,
+    when?: number,
+  ): void;
+  /**
+   * Stage 4g: read every attempt row for a member. Drives the all-spaces
+   * job's pre-loop skip ("don't touch spaces we already verified") and
+   * the post-loop "is the member fully present?" check that flips
+   * `commons_added_at`. Order is unspecified.
+   */
+  listMemberSpaceAttempts(memberId: string): readonly MemberSpaceAttempt[];
+  /**
+   * Stage 4g: delete `failed` attempt rows whose `attempted_at` is older
+   * than `cutoffMs`. Returns the number of rows deleted. Called at the
+   * start of each reconcile pass with a 30-day cutoff to keep the audit
+   * trail bounded — `present` rows are never aged out (they encode the
+   * member's consent decision).
+   */
+  pruneFailedSpaceAttempts(cutoffMs: number): number;
+
   getAgreementsOverview(opts?: GetAgreementsOverviewOpts): AgreementsOverview;
 
   // ---- Stage 4e: change-of-heart audit -------------------------------------
@@ -204,6 +275,29 @@ const SCHEMA_SQL = `
     article_id TEXT NOT NULL,
     sent_at INTEGER NOT NULL,
     PRIMARY KEY (member_id, article_id)
+  );
+
+  /*
+   * Stage 4g: per-(member, space) attempt ledger. The all-spaces job
+   * consults this before each iteration and skips spaces whose row is
+   * 'present', which is the consent guarantee -- once we have added a
+   * member to a space, we never re-add. 'failed' rows retry until they
+   * either succeed (overwritten as 'present') or age out after 30 days.
+   *
+   * space_name is the human-readable key from SPACE_IDS. If a space is
+   * ever renamed, existing rows orphan against the new key -- handle
+   * that as a one-off DB UPDATE at rename time; auto-migration would
+   * require coupling the DB to the JS constant which we deliberately
+   * avoid here.
+   */
+  CREATE TABLE IF NOT EXISTS member_space_attempts (
+    member_id TEXT NOT NULL,
+    space_name TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('present','failed')),
+    attempted_at INTEGER NOT NULL,
+    last_error TEXT,
+    PRIMARY KEY (member_id, space_name),
+    FOREIGN KEY (member_id) REFERENCES members(member_id) ON DELETE CASCADE
   );
 `;
 
@@ -411,6 +505,41 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
     selectAuditState: db.prepare<[string, string], { audit_state: AuditState | null }>(
       `SELECT audit_state FROM agreements WHERE member_id = ? AND article_id = ?`,
     ),
+    /* Stage 4g: attempt ledger statements. The 'present' upsert is allowed
+     * to overwrite a 'failed' row (transition forward); the 'failed'
+     * upsert WHERE-guards against an existing 'present' to make verified
+     * presence permanent on the auto path. */
+    upsertSpacePresent: db.prepare<[string, string, number]>(
+      `INSERT INTO member_space_attempts (member_id, space_name, outcome, attempted_at, last_error)
+       VALUES (?, ?, 'present', ?, NULL)
+       ON CONFLICT(member_id, space_name) DO UPDATE SET
+         outcome = 'present',
+         attempted_at = excluded.attempted_at,
+         last_error = NULL`,
+    ),
+    upsertSpaceFailed: db.prepare<[string, string, number, string | null]>(
+      `INSERT INTO member_space_attempts (member_id, space_name, outcome, attempted_at, last_error)
+       VALUES (?, ?, 'failed', ?, ?)
+       ON CONFLICT(member_id, space_name) DO UPDATE SET
+         outcome = 'failed',
+         attempted_at = excluded.attempted_at,
+         last_error = excluded.last_error
+       WHERE member_space_attempts.outcome <> 'present'`,
+    ),
+    listMemberSpaceAttempts: db.prepare<[string], {
+      space_name: string;
+      outcome: SpaceAttemptOutcome;
+      attempted_at: number;
+      last_error: string | null;
+    }>(
+      `SELECT space_name, outcome, attempted_at, last_error
+       FROM member_space_attempts
+       WHERE member_id = ?`,
+    ),
+    pruneFailedAttempts: db.prepare<[number]>(
+      `DELETE FROM member_space_attempts
+       WHERE outcome = 'failed' AND attempted_at < ?`,
+    ),
   };
 
   /**
@@ -523,6 +652,25 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
         | { commons_added_at: number | null }
         | undefined;
       return Boolean(row && row.commons_added_at !== null);
+    },
+    recordSpacePresent(memberId, spaceName, when = Date.now()) {
+      statements.upsertSpacePresent.run(memberId, spaceName, when);
+    },
+    recordSpaceFailed(memberId, spaceName, error, when = Date.now()) {
+      statements.upsertSpaceFailed.run(memberId, spaceName, when, error ?? null);
+    },
+    listMemberSpaceAttempts(memberId) {
+      const rows = statements.listMemberSpaceAttempts.all(memberId);
+      return rows.map((r) => ({
+        spaceName: r.space_name,
+        outcome: r.outcome,
+        attemptedAt: r.attempted_at,
+        lastError: r.last_error,
+      }));
+    },
+    pruneFailedSpaceAttempts(cutoffMs) {
+      const res = statements.pruneFailedAttempts.run(cutoffMs);
+      return res.changes;
     },
     listMembersForArticle(articleId) {
       const rows = statements.membersForArticle.all(articleId) as Array<{

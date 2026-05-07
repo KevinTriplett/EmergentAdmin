@@ -66,19 +66,6 @@ const DEFAULT_USER_AGENT =
 const DEFAULT_AUDIT_CRON = '0 3 * * *';
 const CRON_OFF_VALUES = new Set(['off', 'disabled', 'false', 'no', '0']);
 
-/**
- * Stage 4f: reconcile-scope env var. Default 'all-eligible' (re-run for
- * every member at threshold; idempotent, catches drift). Set to
- * `not-yet-added` to skip members whose commons_added_at is set —
- * faster runs at the cost of trusting the verified-added flag.
- * Anything else falls back to default. Read at server boot AND at
- * each manual reconcile invocation (no restart needed for changes).
- */
-const RECONCILE_SCOPE_NOT_YET_ADDED = 'not-yet-added';
-function reconcileOnlyNotYetAdded(raw: string | undefined): boolean {
-  return (raw ?? '').trim().toLowerCase() === RECONCILE_SCOPE_NOT_YET_ADDED;
-}
-
 function resolveCronExpr(raw: string | undefined, defaultExpr: string | null): string | null {
   const trimmed = raw?.trim();
   if (trimmed === undefined || trimmed === '') return defaultExpr;
@@ -195,6 +182,20 @@ function parseDryRun(body: Record<string, unknown>): { ok: true; value: boolean 
   if (typeof body.dryRun === 'undefined') return { ok: true, value: true };
   if (typeof body.dryRun !== 'boolean') return { ok: false, error: 'dryRun must be a boolean' };
   return { ok: true, value: body.dryRun };
+}
+
+/**
+ * Stage 4g: optional `force` flag on `/run/add-space-member-all-spaces`.
+ * When true, the all-spaces job ignores the per-(member, space) attempt
+ * ledger's verified-`'present'` rows and re-attempts every space — the
+ * intended manual override for "the member explicitly asked to be put
+ * back into the space they left". Defaults to false so a casual click
+ * never violates the consent guarantee.
+ */
+function parseForce(body: Record<string, unknown>): { ok: true; value: boolean } | { ok: false; error: string } {
+  if (typeof body.force === 'undefined') return { ok: true, value: false };
+  if (typeof body.force !== 'boolean') return { ok: false, error: 'force must be a boolean' };
+  return { ok: true, value: body.force };
 }
 
 /** Express + scheduler; IMAP lifecycle is owned by the process entrypoint. */
@@ -369,10 +370,12 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
     if (!memberId.ok) { res.status(400).json({ error: memberId.error }); return; }
     const headless = parseHeadless(body);
     if (!headless.ok) { res.status(400).json({ error: headless.error }); return; }
+    const force = parseForce(body);
+    if (!force.ok) { res.status(400).json({ error: force.error }); return; }
 
     const job = buildAddToAllSpacesJob(
       { addSpaceMember: deps.addSpaceMember, store: deps.agreementsStore },
-      { fullMemberName: fullMemberName.value, memberId: memberId.value },
+      { fullMemberName: fullMemberName.value, memberId: memberId.value, force: force.value },
     );
     // The manual endpoint always runs at its requested headless-ness.
     job.headless = headless.value;
@@ -416,13 +419,11 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
 
     app.post('/run/reconcile-commons-membership', async (_req: Request, res: Response) => {
       const store = deps.agreementsStore!;
-      const onlyNotYetAdded = reconcileOnlyNotYetAdded(process.env.RECONCILE_COMMONS_SCOPE);
       const members = enqueueCommonsMembershipRepairJobs(
         scheduler,
         { addSpaceMember: deps.addSpaceMember },
         store,
         (msg) => console.log(msg),
-        { onlyNotYetAdded },
       );
       res.status(200).json({
         enqueued: members.length,
@@ -595,15 +596,10 @@ if (isMainModule) {
     const reconcileExpr = resolveReconcileCronExpr(process.env.RECONCILE_COMMONS_CRON);
     if (reconcileExpr !== null) {
       reconcileCronTask = safeCronSchedule('reconcile-commons', reconcileExpr, () => {
-        /* Read scope at fire time so operators can flip the toggle
-         * without restarting (the env var is read on every tick). */
-        const onlyNotYetAdded = reconcileOnlyNotYetAdded(process.env.RECONCILE_COMMONS_SCOPE);
         enqueueCommonsMembershipRepairJobs(
           scheduler,
           { addSpaceMember: defaultAddSpaceMember },
           agreementsStore,
-          undefined,
-          { onlyNotYetAdded },
         );
       });
     }

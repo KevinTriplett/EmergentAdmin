@@ -4,48 +4,47 @@ import { buildAddToAllSpacesJob } from './addToAllSpacesJob.js';
 import { addSpaceMember } from './addSpaceMember.js';
 
 /**
- * Stage 4c / 4f: enqueue idempotent repair jobs so members who meet the
- * agreement threshold receive an add-to-all-spaces pass.
+ * Stage 4g reconcile: enqueue an idempotent repair job for every
+ * eligible member who is not yet verified-added to all Commons spaces.
  *
- * Default scope (`onlyNotYetAdded` omitted or false): every eligible
- * member, regardless of `commons_added_at`. Idempotent on already-added
- * spaces, and the only mechanism that catches silent drift between MN
- * and our DB. Stays the safe default per Stage 4f's design.
+ * Scope is now fixed (no env-var toggle). The pre-Stage-4g design's
+ * "all-eligible" sweep was removed in favour of the consent guarantee
+ * that members are added to each space exactly once: the per-(member,
+ * space) attempt ledger inside `addToAllSpacesJob` skips spaces with a
+ * verified `'present'` row, so re-running for already-finished members
+ * would just no-op anyway. We use `commons_added_at IS NULL` as the
+ * fast filter so reconcile doesn't even iterate the finished cohort.
  *
- * Trimmed scope (`onlyNotYetAdded: true`): eligible AND
- * `commons_added_at IS NULL`. Useful when the full sweep is too
- * expensive to run nightly and the operator trusts the verified-added
- * flag as ground truth. Driven by the `RECONCILE_COMMONS_SCOPE` env
- * var (`not-yet-added` enables it; any other value or unset uses the
- * default).
+ * The job each enqueued member runs:
  *
- * Either way, the job receives the `store` dep so a successful run
- * (failureCount===0) flips `commons_added_at` on the way out.
+ *   - skips spaces it has already verified-present (consent gate);
+ *   - retries spaces with a 'failed' row, or never-seen spaces;
+ *   - records 'present' only on Phase-1-verified hits;
+ *   - flips `commons_added_at` when every space is Phase-1-verified.
+ *
+ * Runs `pruneFailedSpaceAttempts` first with a 30-day cutoff so the
+ * attempt ledger doesn't accumulate stale failures forever — failed
+ * rows for members who are no longer eligible (audit invalidated, or
+ * left the community) get cleaned up here without a separate cron.
  */
-export type EnqueueRepairOptions = {
-  /**
-   * When true, restrict the queue to members whose `commons_added_at`
-   * is still NULL. Default false → re-run for every eligible member.
-   */
-  onlyNotYetAdded?: boolean;
-};
+export const FAILED_ATTEMPT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function enqueueCommonsMembershipRepairJobs(
   scheduler: TaskScheduler,
   deps: { addSpaceMember: typeof addSpaceMember },
   store: AgreementsStore,
   log?: (msg: string) => void,
-  opts?: EnqueueRepairOptions,
 ): Array<{ memberId: string; fullName: string; agreementCount: number }> {
-  const onlyNotYetAdded = opts?.onlyNotYetAdded ?? false;
-  const eligible = onlyNotYetAdded
-    ? store.listMembersEligibleNotYetCommonsAdded()
-    : store.listMembersEligibleForCommonsAdd();
   const notify = log ?? console.log.bind(console);
-  const scopeLabel = onlyNotYetAdded ? 'not-yet-added' : 'all-eligible';
-  notify(
-    `[reconcile] enqueueing repair for ${eligible.length} member(s) (scope=${scopeLabel})`,
-  );
+
+  const cutoff = Date.now() - FAILED_ATTEMPT_TTL_MS;
+  const pruned = store.pruneFailedSpaceAttempts(cutoff);
+  if (pruned > 0) {
+    notify(`[reconcile] pruned ${pruned} failed attempt row(s) older than 30 days`);
+  }
+
+  const eligible = store.listMembersEligibleNotYetCommonsAdded();
+  notify(`[reconcile] enqueueing repair for ${eligible.length} member(s)`);
 
   for (const row of eligible) {
     const job = buildAddToAllSpacesJob(

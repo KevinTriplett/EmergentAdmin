@@ -441,6 +441,68 @@ describe('createApp', () => {
     }
   });
 
+  it('rejects non-boolean `force` on add-space-member-all-spaces with 400', async () => {
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server)
+        .post('/run/add-space-member-all-spaces')
+        .send({ fullMemberName: 'Jane Doe', memberId: '12345', force: 'yes' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/force/i);
+      expect(launchBrowser).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('with force=true, the all-spaces job ignores ledger present rows and visits every space', async () => {
+    /* Stage 4g: seed an attempts ledger so EVERY space is already
+     * marked 'present' for this member. Without `force`, the job's
+     * pre-loop skip would visit zero spaces. With `force: true`, it
+     * must visit every space anyway — the operator override path. */
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    store.recordAgreement({
+      memberId: '12345',
+      fullName: 'Jane Doe',
+      articleId: 'a1',
+      commentId: 'c1',
+      commentedAt: 1,
+      source: 'email',
+    });
+    /* Mark every configured space 'present' for this member. */
+    const { SPACE_IDS } = await import('../src/tasks/removeSpaceMembers.js');
+    for (const spaceName of Object.keys(SPACE_IDS)) {
+      store.recordSpacePresent('12345', spaceName);
+    }
+
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    addSpaceMember.mockResolvedValue({ success: true, error: 'Already a member' });
+
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+    });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/add-space-member-all-spaces').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
+        force: true,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.skippedCount).toBe(0);
+      expect(addSpaceMember).toHaveBeenCalledTimes(Object.keys(SPACE_IDS).length);
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
   // -------------------------------------------------------------------------
   // POST /run/reconcile-commons-membership (Stage 4c)
   // -------------------------------------------------------------------------

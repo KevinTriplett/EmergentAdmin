@@ -490,6 +490,159 @@ describe('agreementsStore', () => {
     });
   });
 
+  /*
+   * Stage 4g — per-(member, space) attempt ledger.
+   *
+   * The ledger is the consent gate: once a row is `'present'` for
+   * (member, space), the auto path (reconcile + the all-spaces job's
+   * pre-loop skip) will never re-attempt that pair, even if the member
+   * later leaves the space. `'failed'` rows are informational and age
+   * out after 30 days.
+   *
+   * Behavioral invariants this block pins:
+   *   1. recordSpacePresent upserts and replaces 'failed' with 'present'.
+   *   2. recordSpaceFailed never overwrites a 'present' row.
+   *   3. listMemberSpaceAttempts returns one entry per (member, space).
+   *   4. pruneFailedSpaceAttempts only deletes 'failed' rows older than
+   *      the supplied cutoff and leaves 'present' rows untouched.
+   *   5. The ledger cascades on member deletion (via FK ON DELETE CASCADE).
+   */
+  describe('Stage 4g member_space_attempts', () => {
+    function seedMember(id: string, name: string) {
+      store.recordAgreement(agreement(id, 'a1', { fullName: name }));
+    }
+
+    it('starts empty for a fresh member', () => {
+      seedMember('m1', 'Alice');
+      expect(store.listMemberSpaceAttempts('m1')).toEqual([]);
+    });
+
+    it('recordSpacePresent inserts a present row', () => {
+      seedMember('m1', 'Alice');
+      store.recordSpacePresent('m1', 'Marketplace', 1_700_000_000_000);
+      const rows = store.listMemberSpaceAttempts('m1');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual({
+        spaceName: 'Marketplace',
+        outcome: 'present',
+        attemptedAt: 1_700_000_000_000,
+        lastError: null,
+      });
+    });
+
+    it('recordSpacePresent overwrites a prior failed row (transition forward)', () => {
+      seedMember('m1', 'Alice');
+      store.recordSpaceFailed('m1', 'Marketplace', 'transient MN error', 1);
+      expect(store.listMemberSpaceAttempts('m1')[0].outcome).toBe('failed');
+
+      store.recordSpacePresent('m1', 'Marketplace', 2);
+      const rows = store.listMemberSpaceAttempts('m1');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual({
+        spaceName: 'Marketplace',
+        outcome: 'present',
+        attemptedAt: 2,
+        lastError: null,
+      });
+    });
+
+    it('recordSpacePresent is idempotent on repeat calls (bumps attempted_at, stays present)', () => {
+      seedMember('m1', 'Alice');
+      store.recordSpacePresent('m1', 'Marketplace', 1);
+      store.recordSpacePresent('m1', 'Marketplace', 2);
+      const rows = store.listMemberSpaceAttempts('m1');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual({
+        spaceName: 'Marketplace',
+        outcome: 'present',
+        attemptedAt: 2,
+        lastError: null,
+      });
+    });
+
+    it('recordSpaceFailed does NOT overwrite a present row (consent guarantee)', () => {
+      seedMember('m1', 'Alice');
+      store.recordSpacePresent('m1', 'Marketplace', 1);
+      /* Manual force-style retry that throws. The ledger must not
+       * downgrade a verified-present row back to 'failed' — that would
+       * re-open the door to re-adding a member who chose to leave. */
+      store.recordSpaceFailed('m1', 'Marketplace', 'late error', 2);
+      const rows = store.listMemberSpaceAttempts('m1');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].outcome).toBe('present');
+      expect(rows[0].attemptedAt).toBe(1);
+      expect(rows[0].lastError).toBeNull();
+    });
+
+    it('recordSpaceFailed upserts when no row exists', () => {
+      seedMember('m1', 'Alice');
+      store.recordSpaceFailed('m1', 'Marketplace', 'boom', 7);
+      const rows = store.listMemberSpaceAttempts('m1');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual({
+        spaceName: 'Marketplace',
+        outcome: 'failed',
+        attemptedAt: 7,
+        lastError: 'boom',
+      });
+    });
+
+    it('recordSpaceFailed updates an existing failed row (latest attempt wins)', () => {
+      seedMember('m1', 'Alice');
+      store.recordSpaceFailed('m1', 'Marketplace', 'first error', 1);
+      store.recordSpaceFailed('m1', 'Marketplace', 'second error', 2);
+      const rows = store.listMemberSpaceAttempts('m1');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual({
+        spaceName: 'Marketplace',
+        outcome: 'failed',
+        attemptedAt: 2,
+        lastError: 'second error',
+      });
+    });
+
+    it('listMemberSpaceAttempts returns one row per (member, space)', () => {
+      seedMember('m1', 'Alice');
+      seedMember('m2', 'Bob');
+      store.recordSpacePresent('m1', 'Marketplace', 1);
+      store.recordSpacePresent('m1', 'Creative Center', 2);
+      store.recordSpaceFailed('m1', '8. Miscellaneous', 'oops', 3);
+      store.recordSpacePresent('m2', 'Marketplace', 4);
+
+      const m1 = store.listMemberSpaceAttempts('m1');
+      expect(m1.map((r) => r.spaceName).sort()).toEqual([
+        '8. Miscellaneous',
+        'Creative Center',
+        'Marketplace',
+      ]);
+      const m2 = store.listMemberSpaceAttempts('m2');
+      expect(m2.map((r) => r.spaceName)).toEqual(['Marketplace']);
+    });
+
+    it('pruneFailedSpaceAttempts deletes only failed rows older than the cutoff', () => {
+      seedMember('m1', 'Alice');
+      store.recordSpaceFailed('m1', 'old-failed', 'stale', 100);
+      store.recordSpaceFailed('m1', 'recent-failed', 'fresh', 500);
+      store.recordSpacePresent('m1', 'old-present', 100);
+      store.recordSpacePresent('m1', 'recent-present', 500);
+
+      const deleted = store.pruneFailedSpaceAttempts(200);
+      expect(deleted).toBe(1);
+
+      const remaining = store.listMemberSpaceAttempts('m1').map((r) => r.spaceName).sort();
+      expect(remaining).toEqual(['old-present', 'recent-failed', 'recent-present']);
+    });
+
+    it('pruneFailedSpaceAttempts NEVER removes a present row, even when very old', () => {
+      seedMember('m1', 'Alice');
+      store.recordSpacePresent('m1', 'Marketplace', 1);
+      const deleted = store.pruneFailedSpaceAttempts(Number.MAX_SAFE_INTEGER);
+      expect(deleted).toBe(0);
+      expect(store.listMemberSpaceAttempts('m1')).toHaveLength(1);
+    });
+
+  });
+
   describe('schema migration', () => {
     it('opening an existing DB file twice is idempotent and preserves data', () => {
       // Use a temp file path so we can re-open it.

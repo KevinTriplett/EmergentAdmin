@@ -613,6 +613,119 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
+## 7.1 Lock down the dashboard (HTTP Basic Auth + rate-limit)
+
+The dashboard exposes destructive endpoints (mass-add to spaces, mass-remove, audit, abort) and a live-log WebSocket. Without auth, anyone who guesses the subdomain can disrupt the community. Gate everything at nginx so the Node app is never reachable from the public internet without credentials.
+
+> **Why nginx, not the Node app?**
+> The dashboard's WebSocket (live logs + Abort) lives on the same vhost. Putting auth at nginx covers the UI, every `POST /run/*`, and the WS upgrade in one shot, with zero application-side code to maintain. It also leaves the door open to swap in OAuth proxy / SSO / IP allowlist later without touching the app.
+
+> **Apply this BEFORE running certbot in §8.** When certbot rewrites the file to add the `server { listen 443 ssl; ... }` block, it copies the existing `location /` directives — including `auth_basic` — into the new block automatically. If you already ran certbot, see "Retrofitting on an already-TLS'd vhost" below.
+
+### Step 1 — Install `htpasswd`
+
+```bash
+sudo apt-get install -y apache2-utils
+```
+
+### Step 2 — Create the password file (bcrypt)
+
+Use `-B` for bcrypt. Without it `htpasswd` defaults to legacy DES, which silently truncates passwords to 8 characters.
+
+```bash
+# -c creates the file. Pick a long passphrase (20+ chars from a password manager).
+sudo htpasswd -B -c /etc/nginx/.htpasswd-emergent-admin admin
+
+# Lock it down: root owns, nginx worker reads.
+sudo chown root:www-data /etc/nginx/.htpasswd-emergent-admin
+sudo chmod 640 /etc/nginx/.htpasswd-emergent-admin
+```
+
+To rotate the password later, omit `-c` (otherwise the file is recreated and any other entries are wiped):
+
+```bash
+sudo htpasswd -B /etc/nginx/.htpasswd-emergent-admin admin
+```
+
+### Step 3 — Add a per-IP rate-limit zone
+
+`limit_req_zone` only works in `http` context, so it goes in a top-level conf, not inside the vhost:
+
+```bash
+sudo tee /etc/nginx/conf.d/emergent-admin-ratelimit.conf > /dev/null <<'EOF'
+# Per-IP request bucket for the admin dashboard.
+# 60 r/m sustained is well above any human operator's clicking rate
+# (typical SPA polls /status/agreements every few seconds) but throttles
+# scripted password-guessing to one attempt per second, where bcrypt's
+# ~100ms cost makes brute-force impractical.
+limit_req_zone $binary_remote_addr zone=admin_dash:10m rate=60r/m;
+EOF
+```
+
+### Step 4 — Wire `auth_basic` and `limit_req` into the vhost
+
+Edit `/etc/nginx/sites-available/emergent-admin`. Add the four highlighted lines at the top of `location /`:
+
+```nginx
+location / {
+    auth_basic           "Emergent Admin";
+    auth_basic_user_file /etc/nginx/.htpasswd-emergent-admin;
+    limit_req            zone=admin_dash burst=30 nodelay;
+
+    proxy_pass http://emergent_admin;
+    proxy_http_version 1.1;
+
+    # WebSocket support — Basic Auth flows through the upgrade request
+    # because the browser sends the cached Authorization header on it.
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+}
+```
+
+> **Don't move `auth_basic` to a sub-location like `/run/`.** The browser opens a WebSocket at `/`. Basic Auth must gate that upgrade request too — otherwise an attacker can connect to the live-log stream and trigger `Abort` without ever loading the UI.
+
+### Step 5 — Test and reload
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### Step 6 — Verify
+
+```bash
+# No credentials → 401
+curl -i http://admin.emergentcommons.app/ | head -1
+# HTTP/1.1 401 Unauthorized
+
+# Wrong credentials → 401
+curl -i -u admin:wrong http://admin.emergentcommons.app/ | head -1
+
+# Right credentials → 200
+curl -i -u admin:'<your-passphrase>' http://admin.emergentcommons.app/ | head -1
+# HTTP/1.1 200 OK
+```
+
+In the browser, the first visit to `https://admin.emergentcommons.app/` will trigger the native credentials dialog. Once entered, the browser caches them per realm until the browser process exits. There is no logout button — closing all browser windows clears the cache.
+
+### Retrofitting on an already-TLS'd vhost
+
+If certbot has already rewritten the file, it now contains both a `server { listen 80; ... }` redirect block and a `server { listen 443 ssl; ... }` proxy block. Apply Steps 4–5 to **the 443 block's `location /`** only. The 80 block just redirects to HTTPS, so it doesn't need (and shouldn't run) Basic Auth.
+
+### What this does *not* protect against
+
+- **`localhost:3000` on the box itself.** Anyone with shell on the server can `curl localhost:3000/run/...` directly, bypassing nginx. That's an inherent property of any nginx-layer auth; the mitigation is keeping shell access tight (already the case via the `deploy` user and SSH keys).
+- **Cron jobs.** They run *inside* the Node process, never go through HTTP, so they're unaffected by auth — which is exactly what we want.
+- **CSRF from a malicious site you've visited in another tab while authenticated.** The current `/run/*` endpoints accept `Content-Type: application/json` POSTs, which the browser treats as non-simple and gates behind a CORS preflight; the Node app sends no CORS headers, so the preflight fails and the cross-origin POST never lands. This is a happy accident, not a deliberate defence — if `/run/*` is ever changed to accept form-encoded POSTs, add explicit CSRF protection at the same time.
+
 ## 8. SSL with Let's Encrypt
 
 Since certbot is already installed:
@@ -790,6 +903,33 @@ sudo systemctl show emergent-admin -p User -p Environment
 ### WebSocket disconnects immediately
 
 Check that the nginx config has `proxy_set_header Upgrade` and `Connection "upgrade"`. Without these, nginx drops WebSocket connections.
+
+### Locked out: Basic Auth keeps prompting / forgot the password
+
+Symptom: the credentials dialog reappears even with the right password, or you don't remember the password you set.
+
+Diagnose:
+
+```bash
+# Is the password file where nginx expects it?
+sudo ls -l /etc/nginx/.htpasswd-emergent-admin
+# Should be -rw-r----- 1 root www-data ...
+# If group is wrong, nginx (running as www-data) can't read it → silent 401 loop.
+
+# Does nginx see auth errors in its log?
+sudo tail -n 20 /var/log/nginx/error.log | grep -i 'auth\|password'
+```
+
+Fix: reset the password (omit `-c` so any other entries survive):
+
+```bash
+sudo htpasswd -B /etc/nginx/.htpasswd-emergent-admin admin
+sudo chown root:www-data /etc/nginx/.htpasswd-emergent-admin
+sudo chmod 640 /etc/nginx/.htpasswd-emergent-admin
+sudo systemctl reload nginx
+```
+
+If the dialog *closes* but you immediately get a 503 with `limiting requests` in `/var/log/nginx/error.log`, the `limit_req` rate is too tight — bump `rate=60r/m` to e.g. `120r/m` in `/etc/nginx/conf.d/emergent-admin-ratelimit.conf`, reload nginx.
 
 ### Admin run-log emails aren't arriving
 

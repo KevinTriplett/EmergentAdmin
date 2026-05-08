@@ -291,10 +291,68 @@
     </div>
 
     <div class="tabs" role="tablist" aria-label="MN Host Automator sections">
+      <button id="tab-agreements" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-agreements" tabindex="-1">Agreements</button>
       <button id="tab-add" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-add" tabindex="-1">Add<span class="tab-running-dot" data-tab-running></span></button>
       <button id="tab-remove" type="button" class="tab" role="tab" aria-selected="true" aria-controls="panel-remove" tabindex="0">Remove<span class="tab-running-dot" data-tab-running></span></button>
-      <button id="tab-agreements" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-agreements" tabindex="-1">Agreements</button>
     </div>
+
+    <section id="panel-agreements" class="tabpanel" role="tabpanel" aria-labelledby="tab-agreements" tabindex="0" hidden>
+      <p class="agreements-intro">
+        When the Stage 4a–4c agreements stack runs on this server you get SQLite-backed agreement counts plus an optional
+        IMAP inbox watcher. Refresh loads read-only totals; Poll runs one IMAP inbox round-trip (manual catch-up besides
+        the timer); Enqueue reconcile schedules background add-to-all-spaces repairs for eligible members — same Puppeteer queue
+        as agreement emails — without blocking this page.
+      </p>
+
+      <div id="agreements-dashboard" class="agreements-dashboard" aria-live="polite">Loading agreements status…</div>
+
+      <div class="actions" id="actions-agreements">
+        <button type="button" class="primary" id="btn-agreements-refresh">Refresh status</button>
+        <button type="button" class="primary" id="btn-agreements-poll">Poll inbox now</button>
+        <button type="button" id="btn-agreements-copy-json">Copy status JSON</button>
+        <button type="button" id="btn-reconcile-membership">Enqueue reconcile</button>
+        <button type="button" id="btn-audit-agreements">Audit agreements (change of heart)</button>
+      </div>
+    </section>
+
+    <section id="panel-add" class="tabpanel" role="tabpanel" aria-labelledby="tab-add" tabindex="0" hidden>
+      <label for="add-member-name">Full Member Name</label>
+      <input type="text" id="add-member-name" placeholder="e.g. Jane Doe" autocomplete="off" />
+
+      <div style="height: 0.5rem"></div>
+
+      <label for="add-member-id">Member ID</label>
+      <input type="text" id="add-member-id" placeholder="e.g. 12345678" autocomplete="off" inputmode="numeric" />
+
+      <div style="height: 0.5rem"></div>
+
+      <label for="add-space-select">Commons Space Name</label>
+      <select id="add-space-select">
+        <option>1. Relating to SELF</option>
+        <option>2. Relating to OTHERS</option>
+        <option>3. Relating to WORLD</option>
+        <option>4. Current Events/Politics/Hot Buttons</option>
+        <option>5. News/Ideas from Crews, Teams, Events</option>
+        <option>6. Personal Introductions</option>
+        <option>7. EC Announcements and Highlights</option>
+        <option>8. Miscellaneous</option>
+        <option>Creative Center</option>
+        <option>Marketplace</option>
+      </select>
+
+      <div class="row">
+        <label
+          ><input type="checkbox" id="chk-force-add" /> Force re-add
+          <span id="force-hint" class="dry-hint">(bypass the per-space "added once" gate on "Add To ALL Spaces"; use only when the member explicitly asked to be re-added)</span></label
+        >
+      </div>
+
+      <div class="actions" id="actions-add">
+        <button type="button" class="primary" id="btn-add-selected">Add To Selected Space</button>
+        <button type="button" class="primary" id="btn-add-all">Add To ALL Spaces</button>
+        <button type="button" class="danger btn-abort-inline" id="btn-abort-add" hidden>Abort</button>
+      </div>
+    </section>
 
     <section id="panel-remove" class="tabpanel" role="tabpanel" aria-labelledby="tab-remove" tabindex="0">
       <label for="remove-member-name">Full Member Name</label>
@@ -339,64 +397,6 @@
         <button type="button" class="primary" id="btn-remove-selected">Remove From Selected Space</button>
         <button type="button" class="danger" id="btn-remove-all">Remove From ALL Spaces</button>
         <button type="button" class="danger btn-abort-inline" id="btn-abort-remove" hidden>Abort</button>
-      </div>
-    </section>
-
-    <section id="panel-add" class="tabpanel" role="tabpanel" aria-labelledby="tab-add" tabindex="0" hidden>
-      <label for="add-member-name">Full Member Name</label>
-      <input type="text" id="add-member-name" placeholder="e.g. Jane Doe" autocomplete="off" />
-
-      <div style="height: 0.5rem"></div>
-
-      <label for="add-member-id">Member ID</label>
-      <input type="text" id="add-member-id" placeholder="e.g. 12345678" autocomplete="off" inputmode="numeric" />
-
-      <div style="height: 0.5rem"></div>
-
-      <label for="add-space-select">Commons Space Name</label>
-      <select id="add-space-select">
-        <option>1. Relating to SELF</option>
-        <option>2. Relating to OTHERS</option>
-        <option>3. Relating to WORLD</option>
-        <option>4. Current Events/Politics/Hot Buttons</option>
-        <option>5. News/Ideas from Crews, Teams, Events</option>
-        <option>6. Personal Introductions</option>
-        <option>7. EC Announcements and Highlights</option>
-        <option>8. Miscellaneous</option>
-        <option>Creative Center</option>
-        <option>Marketplace</option>
-      </select>
-
-      <div class="row">
-        <label
-          ><input type="checkbox" id="chk-force-add" /> Force re-add
-          <span id="force-hint" class="dry-hint">(bypass the per-space "added once" gate on "Add To ALL Spaces"; use only when the member explicitly asked to be re-added)</span></label
-        >
-      </div>
-
-      <div class="actions" id="actions-add">
-        <button type="button" class="primary" id="btn-add-selected">Add To Selected Space</button>
-        <button type="button" class="primary" id="btn-add-all">Add To ALL Spaces</button>
-        <button type="button" class="danger btn-abort-inline" id="btn-abort-add" hidden>Abort</button>
-      </div>
-    </section>
-
-    <section id="panel-agreements" class="tabpanel" role="tabpanel" aria-labelledby="tab-agreements" tabindex="0" hidden>
-      <p class="agreements-intro">
-        When the Stage 4a–4c agreements stack runs on this server you get SQLite-backed agreement counts plus an optional
-        IMAP inbox watcher. Refresh loads read-only totals; Poll runs one IMAP inbox round-trip (manual catch-up besides
-        the timer); Enqueue reconcile schedules background add-to-all-spaces repairs for eligible members — same Puppeteer queue
-        as agreement emails — without blocking this page.
-      </p>
-
-      <div id="agreements-dashboard" class="agreements-dashboard" aria-live="polite">Loading agreements status…</div>
-
-      <div class="actions" id="actions-agreements">
-        <button type="button" class="primary" id="btn-agreements-refresh">Refresh status</button>
-        <button type="button" class="primary" id="btn-agreements-poll">Poll inbox now</button>
-        <button type="button" id="btn-agreements-copy-json">Copy status JSON</button>
-        <button type="button" id="btn-reconcile-membership">Enqueue reconcile</button>
-        <button type="button" id="btn-audit-agreements">Audit agreements (change of heart)</button>
       </div>
     </section>
 

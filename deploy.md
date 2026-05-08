@@ -18,9 +18,10 @@ To restart with new code:
 cd ~/EmergentAdmin
 git pull origin
 npm run clean:all
-npm ci
+npm ci --production
 npm run install:browsers
 npm run build
+npm rebuild better-sqlite3
 sudo systemctl restart emergent-admin
 sudo journalctl -u emergent-admin -n 50 --no-pager # check started error-free
 ```
@@ -833,10 +834,13 @@ git pull origin main
 nvm install           # no-op if .nvmrc version already installed
 nvm use
 
+git pull origin
+npm run clean:all
 npm ci --production
 npm run install:browsers
 npm run build
 sudo systemctl restart emergent-admin
+sudo journalctl -u emergent-admin -n 20 --no-pager
 echo "Deployed $(git log -1 --format='%h %s') on node $(node -v)"
 ```
 
@@ -849,6 +853,104 @@ chmod +x ~/deploy-emergent-admin.sh
 > ```
 > deploy ALL=(ALL) NOPASSWD: /bin/systemctl restart emergent-admin
 > ```
+
+## 11. Pulling the production DB to the dev machine
+
+Sometimes you want a real-shaped snapshot of the production SQLite DB on your dev box — to debug a triage query, rehearse a test-member workflow against actual member counts, or verify a schema migration before shipping it. The flow below uses the same WAL-aware `.backup` mechanism as the nightly cron in section 5.2, so production keeps writing while the snapshot is being taken.
+
+### What you're copying
+
+`/home/deploy/EmergentAdmin/data/ec-admin.db` — a SQLite WAL-mode database. The `.backup` command consolidates the live WAL into a single, point-in-time `.db` file, which is what you ship across.
+
+It contains MN member display names, numeric MN member IDs, per-(member, article) agreement records, per-(member, space) attempt outcomes, and processed email message-ids (no email bodies). That's enough PII to treat the local copy carefully: don't commit it to git (`data/` is gitignored — verify before relying on this), don't email it around, and delete it when you're done.
+
+### Option A — Reuse the most recent nightly snapshot (fastest)
+
+If section 5.2's nightly cron is healthy you already have date-stamped snapshots on the server. If one is fresh enough for what you're doing, skip the on-demand `.backup` and just copy a snapshot file directly:
+
+```bash
+# On the dev machine, in the repo root:
+mkdir -p data
+scp deploy@admin.emergentcommons.app:/home/deploy/EmergentAdmin/data/ec-admin-$(date -u +%F).db ./data/ec-admin.db
+chmod 600 ./data/ec-admin.db
+```
+
+If today's nightly hasn't run yet (the cron fires at 03:30 server time), substitute yesterday's date or use Option B.
+
+### Option B — Take a fresh on-demand snapshot
+
+```bash
+# On the dev machine, in the repo root:
+mkdir -p data
+
+# 1. Snapshot on prod (WAL-aware; service can keep writing).
+ssh deploy@admin.emergentcommons.app \
+  'sqlite3 /home/deploy/EmergentAdmin/data/ec-admin.db ".backup /home/deploy/EmergentAdmin/data/ec-admin-dev-pull.db"'
+
+# 2. Pull it down.
+scp deploy@admin.emergentcommons.app:/home/deploy/EmergentAdmin/data/ec-admin-dev-pull.db ./data/ec-admin.db
+chmod 600 ./data/ec-admin.db
+
+# 3. Tidy up the temp file on prod (the nightly snapshots in
+#    ec-admin-YYYY-MM-DD.db are managed by their own prune cron;
+#    leave those alone).
+ssh deploy@admin.emergentcommons.app 'rm /home/deploy/EmergentAdmin/data/ec-admin-dev-pull.db'
+```
+
+> **Don't `scp` `ec-admin.db` directly while the service is running.** The live file may be torn (a write that's still in the WAL won't be in the main file, or vice versa). Always go through `.backup` (or copy a nightly snapshot file, which was itself produced by `.backup`).
+
+### Verify the dev copy
+
+```bash
+sqlite3 ./data/ec-admin.db ".tables"
+# expect: agreements  dms_sent  members  member_space_attempts  processed_emails
+
+sqlite3 ./data/ec-admin.db \
+  "SELECT (SELECT count(*) FROM members) AS members,
+          (SELECT count(*) FROM agreements) AS agreements,
+          (SELECT count(*) FROM processed_emails) AS processed_emails,
+          (SELECT count(*) FROM member_space_attempts) AS attempts;"
+```
+
+The counts should match what `GET /status/agreements` reports on production at the moment of the snapshot. If `.tables` is missing rows (e.g. the dev checkout doesn't know about `member_space_attempts` yet), `git pull` first — `openAgreementsStore` runs `CREATE TABLE IF NOT EXISTS …` on every open, so an older checkout will silently add nothing and queries against the missing column/table will then fail.
+
+### Running the dev server against the copied DB
+
+The DB is safe to use locally — production keeps writing on its own file; the snapshot you copied is a static point-in-time. **Configure dev `.env` carefully before starting the server, though.**
+
+A dev server pointed at a real-data DB can do real damage if you're not deliberate:
+
+- **Disable the IMAP watcher on dev.** Leave `IMAP_HOST` / `IMAP_USER` / `IMAP_PASSWORD` empty (or point them at a throwaway inbox). Otherwise dev will start ingesting real production-side comments and your local DB will diverge from the snapshot in confusing ways.
+- **Keep `NODE_ENV` unset (or anything other than `production`).** This already disables admin run-log emails (section 5.1) so a dev test won't spam the admin list.
+- **Use a different `MN_EMAIL` / `PUPPETEER_USER_DATA_DIR`** if you intend to actually run Puppeteer tasks. Reusing the production credentials means dev clicks land on the real MN site under the real account.
+- **Disable cron schedules.** Leave `RECONCILE_COMMONS_CRON` and `AGREEMENTS_AUDIT_CRON` unset (or set to `off`) so a long-running `npm run dev` doesn't wake up at 02:30 and run reconcile against the snapshot.
+
+If your dev Node version differs from production's, rebuild the native module before opening the DB (the file is portable; the binding is not):
+
+```bash
+npm rebuild better-sqlite3
+```
+
+Then start dev as usual:
+
+```bash
+npm run dev
+# Browse to http://localhost:3000 and confirm the dashboard counts match the snapshot.
+```
+
+### Cleanup
+
+When the test session is over:
+
+```bash
+rm ./data/ec-admin.db
+```
+
+The dev `data/` directory is gitignored, but the file lived on disk and may be in editor caches, terminal scrollback, or `npm test`'s artifacts; a quick `rm` is the bare minimum.
+
+### Reverse direction (dev → prod) is intentionally not documented
+
+Pushing a dev DB onto production would overwrite real member state. If you ever genuinely need to do this (e.g. restoring from a corruption incident), stop the service first (`sudo systemctl stop emergent-admin`), swap the file as the `deploy` user, then start the service. There is no automation for it on purpose — every restore should be a deliberate human decision.
 
 ---
 

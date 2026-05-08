@@ -291,12 +291,12 @@
     </div>
 
     <div class="tabs" role="tablist" aria-label="MN Host Automator sections">
-      <button id="tab-agreements" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-agreements" tabindex="-1">Agreements</button>
+      <button id="tab-agreements" type="button" class="tab" role="tab" aria-selected="true" aria-controls="panel-agreements" tabindex="0">Agreements</button>
       <button id="tab-add" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-add" tabindex="-1">Add<span class="tab-running-dot" data-tab-running></span></button>
-      <button id="tab-remove" type="button" class="tab" role="tab" aria-selected="true" aria-controls="panel-remove" tabindex="0">Remove<span class="tab-running-dot" data-tab-running></span></button>
+      <button id="tab-remove" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-remove" tabindex="-1">Remove<span class="tab-running-dot" data-tab-running></span></button>
     </div>
 
-    <section id="panel-agreements" class="tabpanel" role="tabpanel" aria-labelledby="tab-agreements" tabindex="0" hidden>
+    <section id="panel-agreements" class="tabpanel" role="tabpanel" aria-labelledby="tab-agreements" tabindex="0">
       <p class="agreements-intro">
         When the Stage 4a–4c agreements stack runs on this server you get SQLite-backed agreement counts plus an optional
         IMAP inbox watcher. Refresh loads read-only totals; Poll runs one IMAP inbox round-trip (manual catch-up besides
@@ -354,7 +354,7 @@
       </div>
     </section>
 
-    <section id="panel-remove" class="tabpanel" role="tabpanel" aria-labelledby="tab-remove" tabindex="0">
+    <section id="panel-remove" class="tabpanel" role="tabpanel" aria-labelledby="tab-remove" tabindex="0" hidden>
       <label for="remove-member-name">Full Member Name</label>
       <input type="text" id="remove-member-name" placeholder="e.g. Jane Doe" autocomplete="off" />
 

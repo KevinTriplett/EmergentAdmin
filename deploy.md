@@ -18,13 +18,38 @@ To restart with new code:
 cd ~/EmergentAdmin
 git pull origin
 npm run clean:all
-npm ci --production
+npm ci                                # full install — see "Why no --omit=dev" note below
 npm run install:browsers
 npm run build
-npm rebuild better-sqlite3
+npm rebuild better-sqlite3            # MUST come BEFORE prune — node-gyp toolchain is a devDep
+npm prune --omit=dev                  # leaner runtime; safe only AFTER the rebuild step above
+npm run check:abi                     # fail loudly NOW if the on-disk binary won't load
 sudo systemctl restart emergent-admin
 sudo journalctl -u emergent-admin -n 50 --no-pager # check started error-free
 ```
+
+> **Why this exact step order?** Three constraints have to compose, and getting
+> them out of order is what produces the "everything looks fine until first
+> SQLite open" failure mode that costs an hour to debug:
+>
+> 1. **`npm ci` with no `--omit=dev`.** `tsc` and every `@types/*` package live
+>    in `devDependencies` (see `package.json`). `npm run build` invokes `tsc`,
+>    so omitting devDeps fails the build with `Could not find a declaration
+>    file for module 'express' / 'ws' / 'better-sqlite3' / ...`.
+> 2. **`npm rebuild better-sqlite3` BEFORE `npm prune --omit=dev`.** The native
+>    rebuild needs `node-gyp` and the C++ binding helpers, which are
+>    devDependencies. Pruning first leaves the rebuild with a half-empty
+>    toolchain, which fails opaquely or silently produces a stale binary.
+> 3. **`npm run check:abi` AFTER prune, BEFORE `systemctl restart`.** This
+>    runs `require('better-sqlite3')` from a one-line `node -e`. If the binary
+>    on disk doesn't match the running Node's ABI — for any reason: rebuild
+>    used the wrong Node, prune removed something the binding depended on,
+>    `nvm use` wasn't loaded — it throws here, while you're still attached to
+>    a shell and can fix it. Without the check the same failure shows up at
+>    first SQLite open inside the systemd unit, which is a much more annoying
+>    place to debug. On success it prints e.g. `Node v22.22.2 (ABI 127) -
+>    better-sqlite3 loaded OK`, so the deploy log records exactly which Node
+>    compiled and loaded the binary.
 
 All of the systemd commands:
 
@@ -49,6 +74,7 @@ If the Node version changes or a NODE_MODULE_VERSION mismatch is reported, do:
 
 ```bash
 npm rebuild better-sqlite3
+npm run check:abi   # confirm the rebuild produced an ABI-matching binary
 ```
 
 ### Cleanup after testing
@@ -140,6 +166,7 @@ nvm use                # activates the .nvmrc version for this shell
 npm ci
 npm run install:browsers
 npm run build
+npm run check:abi   # validates `better-sqlite3` loads under the active Node
 ```
 
 ## 5. Configure environment
@@ -836,9 +863,18 @@ nvm use
 
 git pull origin
 npm run clean:all
-npm ci --production
+# Step order matters — see "Why this exact step order?" callout in Section 0.
+# - `npm ci` (no flag): `tsc` + @types/* are devDeps and required by `npm run build`.
+# - `npm rebuild` BEFORE `npm prune`: node-gyp toolchain is a devDep.
+# - `npm run check:abi` AFTER prune: validates the exact on-disk state systemd
+#   will load; halts deploy with `set -e` on ABI mismatch instead of crashing
+#   inside the unit at first SQLite open.
+npm ci
 npm run install:browsers
 npm run build
+npm rebuild better-sqlite3
+npm prune --omit=dev
+npm run check:abi
 sudo systemctl restart emergent-admin
 sudo journalctl -u emergent-admin -n 20 --no-pager
 echo "Deployed $(git log -1 --format='%h %s') on node $(node -v)"
@@ -929,6 +965,7 @@ If your dev Node version differs from production's, rebuild the native module be
 
 ```bash
 npm rebuild better-sqlite3
+npm run check:abi   # confirm the rebuilt binary loads under the dev Node
 ```
 
 Then start dev as usual:

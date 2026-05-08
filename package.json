@@ -9,6 +9,7 @@
     "clean:cache": "rm -rf \"${PUPPETEER_CACHE_DIR:-.cache/puppeteer}\"",
     "clean:all": "npm run clean:dist && npm run clean:profile && npm run clean:cache",
     "build": "npm run clean:dist && tsc",
+    "check:abi": "node -e \"require('better-sqlite3'); console.log('Node ' + process.version + ' (ABI ' + process.versions.modules + ') - better-sqlite3 loaded OK')\"",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "install:browsers": "puppeteer browsers install chrome",

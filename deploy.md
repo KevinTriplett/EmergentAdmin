@@ -77,6 +77,13 @@ npm rebuild better-sqlite3
 npm run check:abi   # confirm the rebuild produced an ABI-matching binary
 ```
 
+Cleanup left over chrome sessions:
+
+```bash
+rm -rf /tmp/org.chromium.*
+rm -rf /tmp/com.google.*
+```
+
 ## 1. Install Node.js via nvm
 
 > **⚠️ Bullseye ↔ Node version constraint — read this first.** The repo pins Node 22 in `.nvmrc` for a reason. Bullseye ships **glibc 2.31** and **g++10 / libstdc++ 10**, and that combination is too old for native modules built against Node 24 or newer:

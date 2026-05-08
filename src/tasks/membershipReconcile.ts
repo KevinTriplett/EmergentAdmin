@@ -2,7 +2,6 @@ import type { AgreementsStore } from '../state/agreementsStore.js';
 import type { TaskScheduler } from '../scheduler/taskScheduler.js';
 import { buildAddToAllSpacesJob } from './addToAllSpacesJob.js';
 import { addSpaceMember } from './addSpaceMember.js';
-import { isMemberIneligible } from '../config/ineligibleMembers.js';
 
 /**
  * Stage 4g reconcile: enqueue an idempotent repair job for every
@@ -52,18 +51,7 @@ export function enqueueCommonsMembershipRepairJobs(
     notify(`[reconcile] pruned ${pruned} failed attempt row(s) older than 30 days`);
   }
 
-  /* Apply the ineligibility gate (`src/config/ineligibleMembers.ts`)
-   * BEFORE enqueueing. Members on that list are excluded entirely
-   * from the auto path; the IMAP poller has the same gate so the
-   * exclusion is consistent across both code paths. The skipped
-   * count is logged at info level so the operator can verify the
-   * filter is doing what they expect. */
-  const allEligible = store.listMembersEligibleNotYetCommonsAdded();
-  const eligible = allEligible.filter((m) => !isMemberIneligible(m.memberId));
-  const skippedIneligible = allEligible.length - eligible.length;
-  if (skippedIneligible > 0) {
-    notify(`[reconcile] excluded ${skippedIneligible} ineligible member(s) from this pass`);
-  }
+  const eligible = store.listMembersEligibleNotYetCommonsAdded();
   notify(`[reconcile] enqueueing repair for ${eligible.length} member(s)`);
 
   for (const row of eligible) {

@@ -77,18 +77,6 @@ npm rebuild better-sqlite3
 npm run check:abi   # confirm the rebuild produced an ABI-matching binary
 ```
 
-### Cleanup after testing
-For ineligible testing, the test member's row in members will have added_at AND commons_added_at set after a successful reconcile. The N agreements rows persist (they're audit history). If you want a clean slate to repeat the test with `sqlite3 data/ec-admin.db`:
-
--- careful: only run for the test member's id
-```
-DELETE FROM member_space_attempts WHERE member_id = '<TEST_ID>';
-DELETE FROM agreements WHERE member_id = '<TEST_ID>';
-DELETE FROM members WHERE member_id = '<TEST_ID>';
-DELETE FROM processed_emails WHERE message_id IN (...);  -- optional; the IDs are MN-side
-```
-The processed_emails deletes are only needed if you want the poller to re-ingest the same email message-ids; otherwise leaving them is harmless because the comments themselves are gone (or the agreements rows are gone, which is what the dashboard counts on).
-
 ## 1. Install Node.js via nvm
 
 > **⚠️ Bullseye ↔ Node version constraint — read this first.** The repo pins Node 22 in `.nvmrc` for a reason. Bullseye ships **glibc 2.31** and **g++10 / libstdc++ 10**, and that combination is too old for native modules built against Node 24 or newer:

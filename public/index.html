@@ -645,48 +645,6 @@
               escapeHtml(String(d.inProgressMemberCount)) +
               '.</p>';
 
-          /* Ineligible-members panel: read-only mirror of the
-           * server's `src/config/ineligibleMembers.ts`. The list is
-           * not editable from the UI by design; managing it
-           * requires a code change + redeploy (the consent
-           * decision is durable enough to want the audit trail of
-           * a git commit). The panel is hidden when the list is
-           * empty so the operator only sees it when it matters. */
-          const inelig = Array.isArray(data.ineligibleMembers) ? data.ineligibleMembers : [];
-          let ineligUl =
-            '<ul class="agreements-dash-list">' +
-            memberRows(inelig, function (row) {
-              const reason = row.reason ? ' • ' + escapeHtml(String(row.reason)) : '';
-              return (
-                '<li>' +
-                escapeHtml(String(row.fullName)) +
-                ' <span style="opacity:0.8">• id ' +
-                escapeHtml(String(row.memberId)) +
-                reason +
-                '</span></li>'
-              );
-            }) +
-            '</ul>';
-          const ineligSection =
-            inelig.length === 0
-              ? ''
-              : '<h3>Ineligible members (excluded from auto-add)</h3>' +
-                '<p class="agreements-dash-note">Configured in <code>src/config/ineligibleMembers.ts</code>; redeploy after edits.</p>' +
-                ineligUl;
-
-          /* If any ineligibles also crossed the agreement
-           * threshold, surface the discrepancy between the
-           * actionable count (what reconcile will pick up) and
-           * the raw count (everyone at threshold without
-           * commons_added_at). Quietly omit otherwise. */
-          const totalIncl = d.eligibleNotYetAddedTotalIncludingIneligible;
-          const ineligNote =
-            typeof totalIncl === 'number' && totalIncl !== eligNotYetCount
-              ? '<p class="agreements-dash-note">' +
-                escapeHtml(String(totalIncl - eligNotYetCount)) +
-                ' member(s) at threshold are excluded from this list as ineligible (see panel below).</p>'
-              : '';
-
           return (
             '<h3>Agreement database</h3>' +
             '<dl class="stat-grid">' +
@@ -718,13 +676,9 @@
             '</ul>' +
             imapHtml +
             '<h3>Eligible, not yet added to Commons</h3>' +
-            ineligNote +
             eligUl +
             '<h3>In progress toward threshold</h3>' +
-            progUl +
-            ineligSection
-
-
+            progUl
           );
 
 
@@ -1187,9 +1141,7 @@
           }
           /* Stage 4g: when force is checked, surface that in the
            * confirm dialog so the operator has one last chance to
-           * notice they're bypassing the "added once" consent gate.
-           * The server-side ineligibility gate is NOT bypassed by
-           * force; that's intentional, see ineligibleMembers.ts. */
+           * notice they're bypassing the "added once" consent gate. */
           const force = !!(chkForceAdd && chkForceAdd.checked);
           const promptMessage = force
             ? 'FORCE re-add "' + cls.name + '" (ID ' + cls.id + ') to ALL spaces? ' +

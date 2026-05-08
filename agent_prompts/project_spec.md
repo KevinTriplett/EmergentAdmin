@@ -105,29 +105,6 @@ same `TaskScheduler` as IMAP. Optional `RECONCILE_COMMONS_CRON`; manual
   for "the member explicitly asked to be re-added to a space they
   left". Default `false` so a casual click never violates the gate.
 
-**Stage 4g overlay (ineligibility list):**
-- `src/config/ineligibleMembers.ts` exports `INELIGIBLE_MEMBERS`, a
-  static array of `{ memberId, fullName, reason }` plus
-  `isMemberIneligible` / `getIneligibilityReason` helpers. Edits are
-  developer-only — the list is version-controlled and a redeploy is
-  required for changes to take effect (no HTTP/UI management
-  surface; auditability comes from git history).
-- The gate fires in three places: the IMAP poller (records the
-  agreement and claims the dedup, but skips the enqueue with a log
-  line), `enqueueCommonsMembershipRepairJobs` (excludes ineligibles
-  from the repair pass and logs the skipped count), and both manual
-  add endpoints (`/run/add-space-member` and
-  `/run/add-space-member-all-spaces` return HTTP 403 with the
-  reason). `force: true` does NOT bypass ineligibility — `force` is
-  the Stage 4g per-(member, space) override, which presupposes the
-  member is eligible.
-- `GET /status/agreements` filters ineligibles out of
-  `eligibleNotYetAddedMembers`, decrements `eligibleNotYetAddedCount`
-  accordingly, preserves the raw value as
-  `eligibleNotYetAddedTotalIncludingIneligible` for diagnostics, and
-  exposes `ineligibleMembers` at the top level so the dashboard can
-  render a read-only panel.
-
 **Stage 4h overlay (bulk-remove kill switch):**
 - `BULK_REMOVE_DISABLED` is a hardcoded `true` in `src/server.ts`.
   When set, `POST /run/remove-space-members` and

@@ -89,13 +89,26 @@ type StoreDeps = Pick<
  */
 export function buildAddToAllSpacesJob(
   deps: { addSpaceMember: typeof addSpaceMember; store?: StoreDeps },
-  input: { fullMemberName: string; memberId: string; reason?: string; force?: boolean },
+  input: {
+    fullMemberName: string;
+    memberId: string;
+    reason?: string;
+    force?: boolean;
+    /**
+     * When `false`, the scheduler launches a visible Chromium window for
+     * this job. Defaults to `true` so prod cron and any caller that
+     * doesn't pass the field stay headless. Surfaced through manual
+     * UI/HTTP triggers only — the cron path keeps the default.
+     */
+    headless?: boolean;
+  },
 ): SchedulerJob<AddToAllSpacesJobResult> {
   const namePrefix = input.reason ? `${input.reason} ` : '';
   const force = input.force ?? false;
+  const headless = input.headless ?? true;
   return {
     name: `${namePrefix}addSpaceMember "${input.fullMemberName}" → ALL spaces${force ? ' (force)' : ''}`,
-    headless: true,
+    headless,
     run: async (ctx: BrowserJobContext) => {
       type SpaceResult = { space: string; success: boolean; error?: string; skipped?: boolean };
       const spaceNames = Object.keys(SPACE_IDS);

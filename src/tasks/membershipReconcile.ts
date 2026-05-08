@@ -35,8 +35,16 @@ export function enqueueCommonsMembershipRepairJobs(
   deps: { addSpaceMember: typeof addSpaceMember },
   store: AgreementsStore,
   log?: (msg: string) => void,
+  /**
+   * Forwarded onto every enqueued `addToAllSpacesJob`. Defaults to
+   * `true` so the cron path and any caller that doesn't opt in stay
+   * headless. Only the manual UI/HTTP trigger flips this to `false`
+   * for visible-browser debugging on the dev box.
+   */
+  options?: { headless?: boolean },
 ): Array<{ memberId: string; fullName: string; agreementCount: number }> {
   const notify = log ?? console.log.bind(console);
+  const headless = options?.headless ?? true;
 
   const cutoff = Date.now() - FAILED_ATTEMPT_TTL_MS;
   const pruned = store.pruneFailedSpaceAttempts(cutoff);
@@ -65,6 +73,7 @@ export function enqueueCommonsMembershipRepairJobs(
         fullMemberName: row.fullName,
         memberId: row.memberId,
         reason: '[reconcile]',
+        headless,
       },
     );
     void scheduler.enqueueBackground(job).catch((err) => {

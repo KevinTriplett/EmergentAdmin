@@ -657,16 +657,27 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
       }
     });
 
-    app.post('/run/reconcile-commons-membership', async (_req: Request, res: Response) => {
+    app.post('/run/reconcile-commons-membership', async (req: Request, res: Response) => {
       const store = deps.agreementsStore!;
+      /* `headless` is a dev affordance: prod cron always launches headless
+       * (it doesn't go through this endpoint — see the scheduler call
+       * inside `safeCronSchedule('reconcile-commons', ...)` which omits
+       * `options` and so picks up the headless-true default). The manual
+       * UI lets an operator uncheck the "Headless mode" box to watch the
+       * Puppeteer flow during a debug session. Anything other than the
+       * literal `false` value falls back to headless. */
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const headless = body.headless === false ? false : true;
       const members = enqueueCommonsMembershipRepairJobs(
         scheduler,
         { addSpaceMember: deps.addSpaceMember },
         store,
         (msg) => console.log(msg),
+        { headless },
       );
       res.status(200).json({
         enqueued: members.length,
+        headless,
         members: members.map((m) => ({
           memberId: m.memberId,
           fullName: m.fullName,

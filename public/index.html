@@ -1257,19 +1257,20 @@
         });
 
         btnReconcileMembership.addEventListener('click', async function () {
-          if (
-            !confirm(
-              'Enqueue commons membership reconcile for everyone at the agreements threshold?',
-            )
-          )
-            return;
+          const headless = chkHeadless.checked;
+          var prompt = 'Enqueue commons membership reconcile for everyone at the agreements threshold?';
+          if (!headless) {
+            prompt +=
+              '\n\nHEADLESS IS OFF: every enqueued member will pop a visible Chromium window in turn. Continue?';
+          }
+          if (!confirm(prompt)) return;
           clearResult();
-          appendLog('[reconcile] POST /run/reconcile-commons-membership …');
+          appendLog('[reconcile] POST /run/reconcile-commons-membership (headless=' + headless + ') …');
           try {
             const res = await fetch('/run/reconcile-commons-membership', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({}),
+              body: JSON.stringify({ headless: headless }),
             });
             const body = await res.json().catch(function () {
               return {};

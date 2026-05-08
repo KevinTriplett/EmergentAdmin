@@ -140,7 +140,7 @@ describe('addSpaceMember', () => {
     expect(result).toEqual({ success: true, error: 'Already a member' });
     expect(page.goto).toHaveBeenCalledWith(
       'https://emergent-commons.mn.co/spaces/5627234/admin/members/all',
-      expect.objectContaining({ waitUntil: 'networkidle2' }),
+      expect.objectContaining({ waitUntil: 'domcontentloaded' }),
     );
     expect(page.goto).toHaveBeenCalledTimes(1); // never navigates to the global members page
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/already in "Marketplace"/i));

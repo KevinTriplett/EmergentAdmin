@@ -204,7 +204,12 @@ export async function login(page: Page, log: LogFn): Promise<{ success: true }> 
 
   try {
     await log('Navigating to login page...');
-    await page.goto(LOGIN_URL, { waitUntil: 'networkidle2' });
+    /* `domcontentloaded` not `networkidle2` — see addSpaceMember.ts for
+     * the rationale. The post-goto `waitForSelector(SEL_SIGN_IN, …)`
+     * is the real "sign-in form is mounted" signal. Without this fix
+     * `goto` would hang the full 30s on the sign-in page too, surfacing
+     * as the misleading "Login failed — check credentials" wrapper. */
+    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
 
     await log('Waiting for app shell...');
     await page.waitForSelector(SEL_SIGN_IN, { timeout: 60_000 });

@@ -398,7 +398,10 @@ const defaultLoadAndScrapeArticleComments: LoadAndScrapeArticleComments = async 
   abortSignal,
 ) => {
   const url = postUrl(articleId);
-  await page.goto(url, { waitUntil: 'networkidle2' });
+  /* `domcontentloaded` not `networkidle2` — see addSpaceMember.ts for
+   * the rationale. `waitForSelector(SEL_COMMENTS_CONTAINER, …)` below
+   * is the actual signal that the comments region has mounted. */
+  await page.goto(url, { waitUntil: 'domcontentloaded' });
   await loginIfNeeded(page, log);
   await page.waitForSelector(SEL_COMMENTS_CONTAINER, { timeout: WAIT_READY_MS });
   /* The comments <ul> may be empty if no one has commented yet — that's a

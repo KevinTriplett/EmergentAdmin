@@ -126,6 +126,67 @@ describe('dumpFailureDiagnostics', () => {
     expect(meta.screenshot).toBeNull();
   });
 
+  it('captures the full error.cause chain so wrapped errors do not hide the real cause', async () => {
+    /* This is the exact shape produced by `auth.ts`'s login() catch:
+     * a generic "Login failed" wrapping a real TimeoutError. Without
+     * cause-chain support the dump would say only "Login failed"
+     * and we'd miss the actual root cause. */
+    const realCause = new Error('Navigation timeout of 30000 ms exceeded');
+    realCause.name = 'TimeoutError';
+    const wrapped = new Error('Login failed — check credentials or MN_COMMUNITY_URL in .env', {
+      cause: realCause,
+    });
+
+    const result = await dumpFailureDiagnostics(
+      makeHappyPage() as never,
+      {
+        reason: 'add-space-member-failed',
+        memberId: '12345',
+        fullSpaceName: 'Some Space',
+        error: wrapped,
+      },
+      () => {},
+    );
+
+    const meta = JSON.parse(await fs.readFile(result.jsonPath!, 'utf8'));
+    expect(meta.error.message).toBe('Login failed — check credentials or MN_COMMUNITY_URL in .env');
+    expect(meta.error.cause).toBeDefined();
+    expect(meta.error.cause.name).toBe('TimeoutError');
+    expect(meta.error.cause.message).toBe('Navigation timeout of 30000 ms exceeded');
+    /* No further nesting on the inner cause. */
+    expect(meta.error.cause.cause).toBeUndefined();
+  });
+
+  it('caps cause-chain depth so a pathological chain cannot run away', async () => {
+    /* Build a 20-deep chain. The serializer must terminate well
+     * before that — both as a runaway guard and so the JSON file
+     * stays a sane size. */
+    let head: Error = new Error('innermost');
+    for (let i = 0; i < 20; i += 1) {
+      head = new Error(`level-${i}`, { cause: head });
+    }
+
+    const result = await dumpFailureDiagnostics(
+      makeHappyPage() as never,
+      {
+        reason: 'add-space-member-failed',
+        memberId: '13',
+        fullSpaceName: 'Space',
+        error: head,
+      },
+      () => {},
+    );
+
+    const meta = JSON.parse(await fs.readFile(result.jsonPath!, 'utf8'));
+    let depth = 0;
+    let node = meta.error;
+    while (node?.cause) {
+      depth += 1;
+      node = node.cause;
+    }
+    expect(depth).toBeLessThanOrEqual(8);
+  });
+
   it('still writes JSON when the screenshot throws (e.g. target closed)', async () => {
     const page: FakePage = {
       ...makeHappyPage(),

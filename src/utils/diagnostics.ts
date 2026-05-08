@@ -74,9 +74,37 @@ function slugify(value: string | undefined, fallback: string): string {
   return slug === '' ? fallback : slug;
 }
 
-function errorToJson(err: unknown): { message: string; name?: string; stack?: string } {
+/**
+ * Recursively serialize an error and its `cause` chain. Without this,
+ * a wrapped error like `new Error('Login failed', { cause: realErr })`
+ * dumps only the misleading top-level message; the actual underlying
+ * cause (e.g. a `TimeoutError: Navigation timeout`) is dropped on the
+ * floor. The chain is bounded by `MAX_CAUSE_DEPTH` so a self-
+ * referential or pathologically deep chain can't run away.
+ */
+type SerializedError = {
+  message: string;
+  name?: string;
+  stack?: string;
+  cause?: SerializedError;
+};
+
+const MAX_CAUSE_DEPTH = 8;
+
+function errorToJson(err: unknown, depth = 0): SerializedError {
   if (err instanceof Error) {
-    return { name: err.name, message: err.message, stack: err.stack };
+    const out: SerializedError = {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+    };
+    /* `cause` is `unknown` per ES2022. We only recurse if depth is
+     * still under the cap and the cause is non-nullish, so a chain of
+     * `{ cause: undefined }` terminates cleanly. */
+    if (depth < MAX_CAUSE_DEPTH && (err as { cause?: unknown }).cause != null) {
+      out.cause = errorToJson((err as { cause?: unknown }).cause, depth + 1);
+    }
+    return out;
   }
   return { message: String(err) };
 }

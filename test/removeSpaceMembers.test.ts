@@ -112,7 +112,7 @@ describe('removeSpaceMembers', () => {
 
     expect(goto).toHaveBeenCalledWith(
       'https://emergent-commons.mn.co/spaces/5627234/admin/members/all',
-      expect.objectContaining({ waitUntil: 'networkidle2' }),
+      expect.objectContaining({ waitUntil: 'domcontentloaded' }),
     );
     expect(loginIfNeeded).toHaveBeenCalledWith(page, log);
     expect(result).toEqual({ success: true, removed: 0 });

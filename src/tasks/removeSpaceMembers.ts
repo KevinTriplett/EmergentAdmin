@@ -411,7 +411,11 @@ export async function removeSpaceMembers({
   const processedIds = new Set<string>();
 
   try {
-    await page.goto(url, { waitUntil: 'networkidle2' });
+    /* `domcontentloaded` not `networkidle2` — MN's real-time channels
+     * keep network activity above the threshold indefinitely; see
+     * addSpaceMember.ts for the full rationale. The post-goto
+     * `waitForSelector(SEL_READY, …)` is the real interactive signal. */
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
     await loginIfNeeded(page, log);
     await page.waitForSelector(SEL_READY, { timeout: 60_000 });
     await page.waitForSelector(SEL_FLYOUT, { timeout: 60_000 });

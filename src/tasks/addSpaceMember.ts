@@ -500,7 +500,14 @@ export async function addSpaceMember({
   try {
     // --- Phase 1: on the space members page, check "already a member" ---
     await log(msg.checkingMembership(fullMemberName, fullSpaceName));
-    await page.goto(spaceUrl(spaceId), { waitUntil: 'networkidle2' });
+    /* `domcontentloaded` not `networkidle2`: Mighty Networks holds open
+     * background channels (cohost panel, presence/notifications) that
+     * keep more than 2 connections active indefinitely, so `networkidle2`
+     * never settles and `goto` times out at 30s even though the page
+     * rendered in 1-2s. The post-goto `waitForSelector(SEL_READY, …)`
+     * waits up to 60s for the actual app shell (`body.pace-done
+     * #community-app`), which is the real "interactive" signal. */
+    await page.goto(spaceUrl(spaceId), { waitUntil: 'domcontentloaded' });
     await loginIfNeeded(page, log);
     await page.waitForSelector(SEL_READY, { timeout: WAIT_READY_MS });
 
@@ -516,7 +523,7 @@ export async function addSpaceMember({
 
     // --- Phase 2: on the global members page, add the member to the space ---
     await log(msg.adding(fullMemberName, fullSpaceName));
-    await page.goto(MEMBERS_URL, { waitUntil: 'networkidle2' });
+    await page.goto(MEMBERS_URL, { waitUntil: 'domcontentloaded' });
     await loginIfNeeded(page, log);
     await page.waitForSelector(SEL_READY, { timeout: WAIT_READY_MS });
 

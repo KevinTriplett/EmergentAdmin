@@ -76,8 +76,20 @@ const msg = {
     `Removal ${ordinal} complete: ${name}.`,
   removalNotConfirmed: (name: string, memberId: string) =>
     `Removal not confirmed: ${memberRef(name, memberId)} is still in the member list. MN may have rejected the removal.`,
+  targetNotFound: (name: string, memberId: string, space: string) =>
+    `${memberRef(name, memberId)} is not in "${space}" — nothing to remove.`,
+  targetIsAdmin: (name: string, memberId: string) =>
+    `${memberRef(name, memberId)} is on the protected admin list and cannot be removed.`,
   clicking: (label: string) => `Clicking ${label}…`,
 } as const;
+
+/**
+ * Sentinel returned in `error` when a targeted removal finds the member
+ * is not actually in the space. Mirrors `ALREADY_A_MEMBER` from the add
+ * side: it's a no-op success, not a failure, but the operator should
+ * know we did nothing. Server endpoints surface this as "not in space".
+ */
+export const NOT_IN_SPACE = 'NOT_IN_SPACE';
 
 export type RemoveSpaceMembersArgs = {
   page: Page;
@@ -87,6 +99,15 @@ export type RemoveSpaceMembersArgs = {
   abortSignal: { aborted: boolean };
   sleep?: (ms: number) => Promise<void>;
   logLevel?: LogLevel;
+  /**
+   * Optional. When set, the task removes ONLY this member instead of
+   * walking the full member list. Both `targetMemberId` and
+   * `targetMemberName` must be supplied together (the name is used
+   * for log lines; the id is what selects the row). When unset, the
+   * task falls back to the original bulk-removal behavior.
+   */
+  targetMemberId?: string;
+  targetMemberName?: string;
 };
 
 export type RemoveSpaceMembersResult = {
@@ -365,12 +386,24 @@ async function logErrorAndFail(
 export async function removeSpaceMembers({
   page, fullSpaceName, dryRun = true, log, abortSignal,
   sleep: sleepArg, logLevel = DEFAULT_LOG_LEVEL,
+  targetMemberId, targetMemberName,
 }: RemoveSpaceMembersArgs): Promise<RemoveSpaceMembersResult> {
   const sleep = sleepArg ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
   const spaceId = SPACE_IDS[fullSpaceName];
   if (!spaceId || !fullSpaceName.trim()) {
     return { success: false, removed: 0, error: msg.unknownSpace(fullSpaceName) };
+  }
+
+  /* Targeted-mode guardrail: refuse to remove protected admins. The
+   * bulk path skips them in `pickFirstEligibleRow`; the targeted path
+   * has to reject explicitly so an operator typo can't accidentally
+   * de-admin the gatekeeper account. Returned as failure so the
+   * all-spaces loop wrapper surfaces it clearly. */
+  if (targetMemberId && ADMIN_IDS.includes(targetMemberId)) {
+    const error = msg.targetIsAdmin(targetMemberName ?? '<unnamed>', targetMemberId);
+    await log(error);
+    return { success: false, removed: 0, error };
   }
 
   const url = spaceUrl(spaceId);
@@ -387,6 +420,57 @@ export async function removeSpaceMembers({
     const totalLoaded = await scrollUntilStable(page, sleep);
     await log(msg.memberListLoaded(fullSpaceName, totalLoaded));
     if (dryRun) await log(msg.dryRunNoRemovals());
+
+    /* Targeted single-member removal: short-circuit the bulk loop.
+     * We still scrolled the flyout so lazy-loaded rows are present;
+     * now check for the specific row by id. If absent, the member
+     * isn't in this space — return a no-op success with the
+     * NOT_IN_SPACE sentinel so the all-spaces wrapper can summarize
+     * it cleanly. If present, run the existing performRemoval +
+     * post-condition wait. */
+    if (targetMemberId) {
+      if (abortSignal.aborted) return logAbortAndReturn(log, removed);
+      const targetName = targetMemberName ?? '<unnamed>';
+
+      const present = await page.$(SEL_MEMBER_ROW(targetMemberId));
+      if (!present) {
+        const noteText = msg.targetNotFound(targetName, targetMemberId, fullSpaceName);
+        await log(noteText);
+        return { success: true, removed: 0, error: NOT_IN_SPACE };
+      }
+      await present.dispose().catch(() => undefined);
+
+      try {
+        await log(
+          dryRun
+            ? msg.dryRunWouldRemove(targetName, targetMemberId)
+            : msg.removingMember(targetName, targetMemberId),
+        );
+        await performRemoval(page, log, targetMemberId, dryRun, logLevel);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return logErrorAndFail(log, removed, message);
+      }
+
+      if (dryRun) {
+        await settleAfterDryRunInteraction(page, log, logLevel, sleep);
+        return { success: true, removed: 0 };
+      }
+
+      try {
+        await page.waitForFunction(
+          (sel) => document.querySelector(sel) === null,
+          { timeout: WAIT_ROW_UPDATE_MS },
+          SEL_MEMBER_ROW(targetMemberId),
+        );
+      } catch {
+        return logErrorAndFail(log, removed, msg.removalNotConfirmed(targetName, targetMemberId));
+      }
+
+      removed = 1;
+      await log(msg.removalComplete(removed, targetName));
+      return { success: true, removed };
+    }
 
     while (true) {
       if (abortSignal.aborted) return logAbortAndReturn(log, removed);

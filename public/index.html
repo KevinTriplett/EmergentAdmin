@@ -289,8 +289,18 @@
     </div>
 
     <section id="panel-remove" class="tabpanel" role="tabpanel" aria-labelledby="tab-remove" tabindex="0">
-      <label for="space-select">Commons Space Name</label>
-      <select id="space-select">
+      <label for="remove-member-name">Full Member Name</label>
+      <input type="text" id="remove-member-name" placeholder="e.g. Jane Doe" autocomplete="off" />
+
+      <div style="height: 0.5rem"></div>
+
+      <label for="remove-member-id">Member ID</label>
+      <input type="text" id="remove-member-id" placeholder="e.g. 12345678" autocomplete="off" inputmode="numeric" />
+
+      <div style="height: 0.5rem"></div>
+
+      <label for="remove-space-select">Commons Space Name</label>
+      <select id="remove-space-select">
         <option>1. Relating to SELF</option>
         <option>2. Relating to OTHERS</option>
         <option>3. Relating to WORLD</option>
@@ -310,9 +320,16 @@
         >
       </div>
 
+      <div class="row">
+        <label
+          ><input type="checkbox" id="chk-remove-all-members" /> ALL Members
+          <span id="all-members-hint" class="dry-hint">(remove every non-admin member; disables Name/ID inputs)</span></label
+        >
+      </div>
+
       <div class="actions" id="actions-remove">
-        <button type="button" class="primary" id="btn-run">Remove From Selected Space</button>
-        <button type="button" class="danger" id="btn-run-all">Remove From ALL Spaces</button>
+        <button type="button" class="primary" id="btn-remove-selected">Remove From Selected Space</button>
+        <button type="button" class="danger" id="btn-remove-all">Remove From ALL Spaces</button>
         <button type="button" class="danger btn-abort-inline" id="btn-abort-remove" hidden>Abort</button>
       </div>
     </section>
@@ -326,14 +343,31 @@
       <label for="add-member-id">Member ID</label>
       <input type="text" id="add-member-id" placeholder="e.g. 12345678" autocomplete="off" inputmode="numeric" />
 
+      <div style="height: 0.5rem"></div>
+
+      <label for="add-space-select">Commons Space Name</label>
+      <select id="add-space-select">
+        <option>1. Relating to SELF</option>
+        <option>2. Relating to OTHERS</option>
+        <option>3. Relating to WORLD</option>
+        <option>4. Current Events/Politics/Hot Buttons</option>
+        <option>5. News/Ideas from Crews, Teams, Events</option>
+        <option>6. Personal Introductions</option>
+        <option>7. EC Announcements and Highlights</option>
+        <option>8. Miscellaneous</option>
+        <option>Creative Center</option>
+        <option>Marketplace</option>
+      </select>
+
       <div class="row">
         <label
           ><input type="checkbox" id="chk-force-add" /> Force re-add
-          <span id="force-hint" class="dry-hint">(bypass the per-space "added once" gate; use only when the member explicitly asked to be re-added)</span></label
+          <span id="force-hint" class="dry-hint">(bypass the per-space "added once" gate on "Add To ALL Spaces"; use only when the member explicitly asked to be re-added)</span></label
         >
       </div>
 
       <div class="actions" id="actions-add">
+        <button type="button" class="primary" id="btn-add-selected">Add To Selected Space</button>
         <button type="button" class="primary" id="btn-add-all">Add To ALL Spaces</button>
         <button type="button" class="danger btn-abort-inline" id="btn-abort-add" hidden>Abort</button>
       </div>
@@ -368,8 +402,9 @@
       (function () {
         const logPanel = document.getElementById('log-panel');
         const resultEl = document.getElementById('result');
-        const btnRun = document.getElementById('btn-run');
-        const btnRunAll = document.getElementById('btn-run-all');
+        const btnRemoveSelected = document.getElementById('btn-remove-selected');
+        const btnRemoveAll = document.getElementById('btn-remove-all');
+        const btnAddSelected = document.getElementById('btn-add-selected');
         const btnAddAll = document.getElementById('btn-add-all');
         const btnAbortRemove = document.getElementById('btn-abort-remove');
         const btnAbortAdd = document.getElementById('btn-abort-add');
@@ -379,14 +414,18 @@
         const btnReconcileMembership = document.getElementById('btn-reconcile-membership');
         const btnAuditAgreements = document.getElementById('btn-audit-agreements');
         const btnClear = document.getElementById('btn-clear-log');
-        const spaceSelect = document.getElementById('space-select');
+        const removeSpaceSelect = document.getElementById('remove-space-select');
+        const addSpaceSelect = document.getElementById('add-space-select');
         const chkHeadless = document.getElementById('chk-headless');
         const chkDry = document.getElementById('chk-dry');
+        const chkRemoveAllMembers = document.getElementById('chk-remove-all-members');
         const chkForceAdd = document.getElementById('chk-force-add');
         const dryHint = document.getElementById('dry-hint');
         const actionsRemove = document.getElementById('actions-remove');
         const actionsAdd = document.getElementById('actions-add');
         const wsDisconnect = document.getElementById('ws-disconnect');
+        const removeMemberName = document.getElementById('remove-member-name');
+        const removeMemberId = document.getElementById('remove-member-id');
         const addMemberName = document.getElementById('add-member-name');
         const addMemberId = document.getElementById('add-member-id');
         const agreementsDashboard = document.getElementById('agreements-dashboard');
@@ -417,8 +456,9 @@
         function setTaskRunning(section) {
           runningSection = section;
           const running = section !== null;
-          btnRun.hidden = running;
-          btnRunAll.hidden = running;
+          btnRemoveSelected.hidden = running;
+          btnRemoveAll.hidden = running;
+          btnAddSelected.hidden = running;
           btnAddAll.hidden = running;
           btnAbortRemove.hidden = section !== 'remove';
           btnAbortAdd.hidden = section !== 'add';
@@ -937,33 +977,204 @@
           }
         }
 
-        btnRun.addEventListener('click', function () {
+        /* ---------------------------------------------------------
+         * Remove tab
+         *
+         * Button matrix:
+         *   ALL Members unchecked + filled inputs ⇒ specific member
+         *     - Selected: POST /run/remove-space-member
+         *     - ALL:      POST /run/remove-space-member-all-spaces
+         *   ALL Members checked + empty inputs ⇒ bulk removal
+         *     - Selected: POST /run/remove-space-members
+         *     - ALL:      POST /run/remove-all-space-members
+         *   ALL Members unchecked + empty inputs ⇒ validation error
+         *   ALL Members checked + non-empty inputs ⇒ validation error
+         *     (handled here; the inputs SHOULD be disabled when ALL
+         *     Members is checked, but if the operator typed values
+         *     first and then checked the box we refuse the request
+         *     instead of guessing).
+         * ------------------------------------------------------- */
+
+        function syncRemoveAllMembersInputs() {
+          const allChecked = !!(chkRemoveAllMembers && chkRemoveAllMembers.checked);
+          removeMemberName.disabled = allChecked;
+          removeMemberId.disabled = allChecked;
+        }
+        if (chkRemoveAllMembers) {
+          chkRemoveAllMembers.addEventListener('change', syncRemoveAllMembersInputs);
+          syncRemoveAllMembersInputs();
+        }
+
+        /**
+         * Validate the Remove inputs for a click on either Remove
+         * button. Returns one of:
+         *   { kind: 'specific', name, id }           — proceed with targeted endpoint
+         *   { kind: 'bulk' }                         — proceed with bulk endpoint
+         *   { kind: 'error', message, focus? }       — log + bail
+         */
+        function classifyRemoveClick() {
+          const allChecked = !!(chkRemoveAllMembers && chkRemoveAllMembers.checked);
+          const name = (removeMemberName.value || '').trim();
+          const id = (removeMemberId.value || '').trim();
+
+          if (allChecked) {
+            if (name || id) {
+              return {
+                kind: 'error',
+                message:
+                  'ALL Members is checked but Name/ID has values. Clear the inputs (or uncheck ALL Members) and try again.',
+              };
+            }
+            return { kind: 'bulk' };
+          }
+
+          if (!name && !id) {
+            return {
+              kind: 'error',
+              message:
+                'Full Member Name and Member ID are required. To remove every non-admin member from the space(s), check the ALL Members box.',
+              focus: removeMemberName,
+            };
+          }
+          if (!name) {
+            return { kind: 'error', message: 'Full Member Name is required.', focus: removeMemberName };
+          }
+          if (!id) {
+            return { kind: 'error', message: 'Member ID is required.', focus: removeMemberId };
+          }
+          return { kind: 'specific', name: name, id: id };
+        }
+
+        btnRemoveSelected.addEventListener('click', function () {
+          const cls = classifyRemoveClick();
+          if (cls.kind === 'error') {
+            appendLog('ERROR: ' + cls.message);
+            if (cls.focus) cls.focus.focus();
+            return;
+          }
+          const dry = chkDry.checked;
+          const dryPrefix = dry ? '[DRY RUN] ' : '';
+          const space = removeSpaceSelect.value;
+
+          if (cls.kind === 'specific') {
+            const promptMessage =
+              dryPrefix + 'Remove "' + cls.name + '" (ID ' + cls.id + ') from "' + space + '"?';
+            if (!confirm(promptMessage)) return;
+            runTask('remove', '/run/remove-space-member', {
+              fullMemberName: cls.name,
+              memberId: cls.id,
+              fullSpaceName: space,
+              headless: chkHeadless.checked,
+              dryRun: dry,
+            });
+            return;
+          }
+
+          /* bulk */
+          const promptMessage =
+            dryPrefix +
+            'Remove ALL non-admin members from "' +
+            space +
+            '"? This deletes every member of this space.';
+          if (!confirm(promptMessage)) return;
           runTask('remove', '/run/remove-space-members', {
-            fullSpaceName: spaceSelect.value,
+            fullSpaceName: space,
             headless: chkHeadless.checked,
-            dryRun: chkDry.checked,
+            dryRun: dry,
           });
         });
 
-        btnRunAll.addEventListener('click', function () {
-          if (!confirm('This will process ALL spaces. Continue?')) return;
+        btnRemoveAll.addEventListener('click', function () {
+          const cls = classifyRemoveClick();
+          if (cls.kind === 'error') {
+            appendLog('ERROR: ' + cls.message);
+            if (cls.focus) cls.focus.focus();
+            return;
+          }
+          const dry = chkDry.checked;
+          const dryPrefix = dry ? '[DRY RUN] ' : '';
+
+          if (cls.kind === 'specific') {
+            const promptMessage =
+              dryPrefix +
+              'Remove "' +
+              cls.name +
+              '" (ID ' +
+              cls.id +
+              ') from ALL Commons spaces?';
+            if (!confirm(promptMessage)) return;
+            runTask('remove', '/run/remove-space-member-all-spaces', {
+              fullMemberName: cls.name,
+              memberId: cls.id,
+              headless: chkHeadless.checked,
+              dryRun: dry,
+            });
+            return;
+          }
+
+          /* bulk: the most destructive operation in the system. The
+           * confirm dialog spells out what's about to happen; the
+           * ALL Members checkbox itself is the primary safeguard. */
+          const promptMessage =
+            dryPrefix +
+            'Remove ALL non-admin members from ALL Commons spaces?\n\n' +
+            'This deletes every non-admin member from every space — the most destructive operation in the system. ' +
+            'Continue?';
+          if (!confirm(promptMessage)) return;
           runTask('remove', '/run/remove-all-space-members', {
             headless: chkHeadless.checked,
-            dryRun: chkDry.checked,
+            dryRun: dry,
+          });
+        });
+
+        /* ---------------------------------------------------------
+         * Add tab
+         *
+         * Both inputs are always required (there is no bulk-add).
+         * "Add To Selected Space" → POST /run/add-space-member.
+         * "Add To ALL Spaces"     → POST /run/add-space-member-all-spaces, with the
+         *                            optional `force` flag (the per-space
+         *                            ledger gate only applies on the
+         *                            all-spaces orchestrator, so force is
+         *                            sent there only).
+         * ------------------------------------------------------- */
+
+        function classifyAddClick() {
+          const name = (addMemberName.value || '').trim();
+          const id = (addMemberId.value || '').trim();
+          if (!name) {
+            return { kind: 'error', message: 'Full Member Name is required.', focus: addMemberName };
+          }
+          if (!id) {
+            return { kind: 'error', message: 'Member ID is required.', focus: addMemberId };
+          }
+          return { kind: 'ok', name: name, id: id };
+        }
+
+        btnAddSelected.addEventListener('click', function () {
+          const cls = classifyAddClick();
+          if (cls.kind === 'error') {
+            appendLog('ERROR: ' + cls.message);
+            if (cls.focus) cls.focus.focus();
+            return;
+          }
+          const space = addSpaceSelect.value;
+          const promptMessage =
+            'Add "' + cls.name + '" (ID ' + cls.id + ') to "' + space + '"?';
+          if (!confirm(promptMessage)) return;
+          runTask('add', '/run/add-space-member', {
+            fullMemberName: cls.name,
+            memberId: cls.id,
+            fullSpaceName: space,
+            headless: chkHeadless.checked,
           });
         });
 
         btnAddAll.addEventListener('click', function () {
-          const name = (addMemberName.value || '').trim();
-          const id = (addMemberId.value || '').trim();
-          if (!name) {
-            appendLog('ERROR: Full Member Name is required.');
-            addMemberName.focus();
-            return;
-          }
-          if (!id) {
-            appendLog('ERROR: Member ID is required.');
-            addMemberId.focus();
+          const cls = classifyAddClick();
+          if (cls.kind === 'error') {
+            appendLog('ERROR: ' + cls.message);
+            if (cls.focus) cls.focus.focus();
             return;
           }
           /* Stage 4g: when force is checked, surface that in the
@@ -973,13 +1184,13 @@
            * force; that's intentional, see ineligibleMembers.ts. */
           const force = !!(chkForceAdd && chkForceAdd.checked);
           const promptMessage = force
-            ? 'FORCE re-add "' + name + '" (ID ' + id + ') to ALL spaces? ' +
+            ? 'FORCE re-add "' + cls.name + '" (ID ' + cls.id + ') to ALL spaces? ' +
               'This bypasses the per-space "added once" gate. Use only when the member explicitly asked to be re-added.'
-            : 'Add "' + name + '" (ID ' + id + ') to ALL spaces?';
+            : 'Add "' + cls.name + '" (ID ' + cls.id + ') to ALL spaces?';
           if (!confirm(promptMessage)) return;
           runTask('add', '/run/add-space-member-all-spaces', {
-            fullMemberName: name,
-            memberId: id,
+            fullMemberName: cls.name,
+            memberId: cls.id,
             headless: chkHeadless.checked,
             force: force,
           });

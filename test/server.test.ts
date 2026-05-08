@@ -21,7 +21,7 @@ const EMPTY_POLL_RESULT: PollResult = {
 function postJson(
   server: Server,
   body: object,
-  path = '/run/remove-space-members',
+  path: string,
 ): Promise<{ status: number; json: unknown }> {
   const addr = server.address() as AddressInfo | string | null;
   if (!addr || typeof addr === 'string') {
@@ -105,35 +105,89 @@ describe('createApp', () => {
     } as unknown as Page;
   }
 
-  it('returns 400 when fullSpaceName is missing', async () => {
-    launchBrowser.mockRejectedValue(new Error('should not launch'));
-    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
-    await listen(server);
-    try {
-      const res = await request(server).post('/run/remove-space-members').send({});
-      expect(res.status).toBe(400);
-      expect(res.body).toEqual({ error: 'fullSpaceName is required' });
-      expect(launchBrowser).not.toHaveBeenCalled();
-    } finally {
-      await closeServer(server);
-    }
-  });
+  // -------------------------------------------------------------------------
+  // Bulk-remove kill switch
+  //
+  // Both /run/remove-space-members and /run/remove-all-space-members
+  // are intentionally disabled by the hardcoded BULK_REMOVE_DISABLED
+  // constant in src/server.ts. Each endpoint returns HTTP 403 with a
+  // self-describing body BEFORE any validation, browser launch, or
+  // scheduler interaction. Tests below pin that contract (status,
+  // shape, and the absence of side effects); when the switch is ever
+  // flipped back, these tests are the trip wire for updating the
+  // suite to cover the re-enabled flows.
+  // -------------------------------------------------------------------------
 
-  it('returns 400 when fullSpaceName is not a non-empty string', async () => {
+  it('returns 403 with disabled body on /run/remove-space-members and does no work', async () => {
+    launchBrowser.mockRejectedValue(new Error('should not launch'));
     const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
     await listen(server);
     try {
       const res = await request(server)
         .post('/run/remove-space-members')
-        .send({ fullSpaceName: '   ' });
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/fullSpaceName/i);
+        .send({ fullSpaceName: 'Marketplace' });
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({
+        error: 'Bulk member removal is disabled.',
+      });
+      expect(res.body.detail).toMatch(/BULK_REMOVE_DISABLED = false/);
+      /* Kill switch must fire before validation, browser launch, or
+       * the scheduler. None of these mocks should have been touched. */
+      expect(launchBrowser).not.toHaveBeenCalled();
+      expect(removeSpaceMembers).not.toHaveBeenCalled();
     } finally {
       await closeServer(server);
     }
   });
 
-  it('returns 409 when a task is already running', async () => {
+  it('returns 403 even when the bulk endpoint is called with no body', async () => {
+    /* The kill switch must short-circuit BEFORE the
+     * "fullSpaceName is required" validation that previously
+     * fronted this endpoint, so an empty POST is also a 403, not a
+     * 400. This pins that ordering. */
+    launchBrowser.mockRejectedValue(new Error('should not launch'));
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-members').send({});
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/disabled/i);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('returns 403 with disabled body on /run/remove-all-space-members and does no work', async () => {
+    launchBrowser.mockRejectedValue(new Error('should not launch'));
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-all-space-members').send({});
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({
+        error: 'Bulk member removal is disabled.',
+      });
+      expect(res.body.detail).toMatch(/BULK_REMOVE_DISABLED = false/);
+      expect(launchBrowser).not.toHaveBeenCalled();
+      expect(removeSpaceMembers).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Generic scheduler/launch behaviors
+  //
+  // These were previously verified via /run/remove-space-members
+  // (when bulk removal was active). Now they're exercised against
+  // /run/remove-space-member (the targeted endpoint), which still
+  // goes through the same exclusive-task lock and browser launch
+  // path. The behaviors are endpoint-agnostic; the targeted
+  // endpoint is just a convenient host now that the bulk one is
+  // disabled.
+  // -------------------------------------------------------------------------
+
+  it('returns 409 when a task is already running (via /run/remove-space-member)', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -141,7 +195,7 @@ describe('createApp', () => {
 
     removeSpaceMembers.mockImplementationOnce(async () => {
       await gate;
-      return { success: true, removed: 0 };
+      return { success: true, removed: 1 };
     });
 
     const mockPage = buildMockPage();
@@ -151,15 +205,25 @@ describe('createApp', () => {
     const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
     await listen(server);
     try {
-      const firstPromise = postJson(server, {
-        fullSpaceName: 'Marketplace',
-        headless: true,
-        dryRun: true,
-      });
+      const firstPromise = postJson(
+        server,
+        {
+          fullMemberName: 'Jane Doe',
+          memberId: '12345',
+          fullSpaceName: 'Marketplace',
+          headless: true,
+          dryRun: true,
+        },
+        '/run/remove-space-member',
+      );
 
       await expect.poll(() => removeSpaceMembers.mock.calls.length).toBeGreaterThan(0);
 
-      const second = await postJson(server, { fullSpaceName: 'Marketplace' });
+      const second = await postJson(
+        server,
+        { fullMemberName: 'Jane Doe', memberId: '12345', fullSpaceName: 'Marketplace' },
+        '/run/remove-space-member',
+      );
       expect(second.status).toBe(409);
       expect(second.json).toEqual({ error: 'A task is already running' });
 
@@ -171,70 +235,18 @@ describe('createApp', () => {
     }
   });
 
-  it('returns 500 when browser launch fails', async () => {
+  it('returns 500 when browser launch fails (via /run/remove-space-member)', async () => {
     launchBrowser.mockRejectedValue(new Error('Chromium not found'));
     const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
     await listen(server);
     try {
-      const res = await request(server).post('/run/remove-space-members').send({
+      const res = await request(server).post('/run/remove-space-member').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
         fullSpaceName: 'Marketplace',
       });
       expect(res.status).toBe(500);
       expect(res.body).toEqual({ error: 'Chromium not found' });
-    } finally {
-      await closeServer(server);
-    }
-  });
-
-  it('returns 200 with task result on success', async () => {
-    const mockPage = buildMockPage();
-    newPage.mockResolvedValue(mockPage);
-    launchBrowser.mockResolvedValue({ newPage, close });
-    removeSpaceMembers.mockResolvedValue({ success: true, removed: 0 });
-
-    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
-    await listen(server);
-    try {
-      const res = await request(server).post('/run/remove-space-members').send({
-        fullSpaceName: 'Marketplace',
-        dryRun: true,
-        headless: true,
-      });
-
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({ success: true, removed: 0 });
-      expect(launchBrowser).toHaveBeenCalledWith(true);
-      expect(removeSpaceMembers).toHaveBeenCalledWith({
-        page: mockPage,
-        fullSpaceName: 'Marketplace',
-        dryRun: true,
-        log: expect.any(Function),
-        abortSignal: { aborted: false },
-        sleep: expect.any(Function),
-      });
-      expect(close).toHaveBeenCalled();
-    } finally {
-      await closeServer(server);
-    }
-  });
-
-  it('defaults headless and dryRun to true when omitted', async () => {
-    const mockPage = buildMockPage();
-    newPage.mockResolvedValue(mockPage);
-    launchBrowser.mockResolvedValue({ newPage, close });
-    removeSpaceMembers.mockResolvedValue({ success: true, removed: 0 });
-
-    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
-    await listen(server);
-    try {
-      await request(server).post('/run/remove-space-members').send({
-        fullSpaceName: 'Marketplace',
-      });
-
-      expect(launchBrowser).toHaveBeenCalledWith(true);
-      expect(removeSpaceMembers).toHaveBeenCalledWith(
-        expect.objectContaining({ dryRun: true }),
-      );
     } finally {
       await closeServer(server);
     }
@@ -248,6 +260,186 @@ describe('createApp', () => {
       const res = await request(server).get('/');
       expect(res.status).toBe(200);
       expect(res.text).toContain('MN Host Automator');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // POST /run/remove-space-member (specific member, single space)
+  // -------------------------------------------------------------------------
+
+  it('returns 400 when fullMemberName is missing on remove-space-member', async () => {
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server)
+        .post('/run/remove-space-member')
+        .send({ memberId: '12345', fullSpaceName: 'Marketplace' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/fullMemberName/i);
+      expect(removeSpaceMembers).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('returns 400 when memberId is missing on remove-space-member', async () => {
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server)
+        .post('/run/remove-space-member')
+        .send({ fullMemberName: 'Jane Doe', fullSpaceName: 'Marketplace' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/memberId/i);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('returns 400 when fullSpaceName is missing on remove-space-member', async () => {
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server)
+        .post('/run/remove-space-member')
+        .send({ fullMemberName: 'Jane Doe', memberId: '12345' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/fullSpaceName/i);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('passes targetMemberId/targetMemberName through to removeSpaceMembers on remove-space-member', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    removeSpaceMembers.mockResolvedValue({ success: true, removed: 1 });
+
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-member').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
+        fullSpaceName: 'Marketplace',
+        dryRun: false,
+        headless: true,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ success: true, removed: 1 });
+      expect(removeSpaceMembers).toHaveBeenCalledWith(
+        expect.objectContaining({
+          page: mockPage,
+          fullSpaceName: 'Marketplace',
+          dryRun: false,
+          targetMemberId: '12345',
+          targetMemberName: 'Jane Doe',
+        }),
+      );
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('surfaces NOT_IN_SPACE as a no-op success on remove-space-member', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    removeSpaceMembers.mockResolvedValue({ success: true, removed: 0, error: 'NOT_IN_SPACE' });
+
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-member').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
+        fullSpaceName: 'Marketplace',
+      });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ success: true, removed: 0, error: 'NOT_IN_SPACE' });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // POST /run/remove-space-member-all-spaces (specific member, every space)
+  // -------------------------------------------------------------------------
+
+  it('returns 400 when fullMemberName is missing on remove-space-member-all-spaces', async () => {
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server)
+        .post('/run/remove-space-member-all-spaces')
+        .send({ memberId: '12345' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/fullMemberName/i);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('invokes removeSpaceMembers once per SPACE_IDS with target fields on remove-space-member-all-spaces', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    removeSpaceMembers.mockResolvedValue({ success: true, removed: 1 });
+
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-member-all-spaces').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
+      });
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.spaces)).toBe(true);
+      expect(res.body.spaces.length).toBeGreaterThan(0);
+      expect(res.body.totalRemoved).toBe(res.body.spaces.length);
+      expect(res.body.skippedCount).toBe(0);
+      expect(res.body.failureCount).toBe(0);
+      expect(removeSpaceMembers).toHaveBeenCalledTimes(res.body.spaces.length);
+      /* Every call must carry the target* fields. */
+      for (const call of removeSpaceMembers.mock.calls) {
+        expect(call[0]).toEqual(
+          expect.objectContaining({
+            targetMemberId: '12345',
+            targetMemberName: 'Jane Doe',
+          }),
+        );
+      }
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('counts NOT_IN_SPACE as skipped (not failed) on remove-space-member-all-spaces', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    /* First space: not in space (skip). Rest: removed. */
+    removeSpaceMembers
+      .mockResolvedValueOnce({ success: true, removed: 0, error: 'NOT_IN_SPACE' })
+      .mockResolvedValue({ success: true, removed: 1 });
+
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-member-all-spaces').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.skippedCount).toBe(1);
+      expect(res.body.failureCount).toBe(0);
+      expect(res.body.totalRemoved).toBe(res.body.spaces.length - 1);
+      const skipped = res.body.spaces.find((s: { skipped: boolean }) => s.skipped);
+      expect(skipped).toBeTruthy();
+      expect(skipped.error).toBe('NOT_IN_SPACE');
     } finally {
       await closeServer(server);
     }
@@ -909,6 +1101,12 @@ describe('createApp', () => {
   // Admin-email-on-run hook
   // -------------------------------------------------------------------------
 
+  /* Admin-email-on-run hook tests previously exercised
+   * /run/remove-space-members; with that endpoint disabled by the
+   * BULK_REMOVE_DISABLED kill switch they now run against
+   * /run/remove-space-member (targeted), which uses the same
+   * removeSpaceMembers mock and the same exclusive-task wrapper —
+   * the email integration is endpoint-agnostic. */
   it('calls sendRunLogEmail with captured log lines + success summary on success', async () => {
     const mockPage = buildMockPage();
     newPage.mockResolvedValue(mockPage);
@@ -916,13 +1114,15 @@ describe('createApp', () => {
     removeSpaceMembers.mockImplementation(async ({ log }: { log: (m: string) => void }) => {
       log('doing things');
       log('done things');
-      return { success: true, removed: 2 };
+      return { success: true, removed: 1 };
     });
 
     const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember, sendRunLogEmail });
     await listen(server);
     try {
-      const res = await request(server).post('/run/remove-space-members').send({
+      const res = await request(server).post('/run/remove-space-member').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
         fullSpaceName: 'Marketplace',
         dryRun: false,
         headless: true,
@@ -936,9 +1136,10 @@ describe('createApp', () => {
       const payload = sendRunLogEmail.mock.calls[0][0];
       expect(payload.outcome).toBe('success');
       expect(payload.taskName).toContain('Marketplace');
-      expect(payload.summary).toContain('2 removed');
+      expect(payload.taskName).toContain('Jane Doe');
+      expect(payload.summary).toContain('removed');
       expect(payload.logLines).toEqual(expect.arrayContaining(['doing things', 'done things']));
-      expect(payload.result).toEqual({ success: true, removed: 2 });
+      expect(payload.result).toEqual({ success: true, removed: 1 });
     } finally {
       await closeServer(server);
     }
@@ -953,7 +1154,9 @@ describe('createApp', () => {
     const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember, sendRunLogEmail });
     await listen(server);
     try {
-      const res = await request(server).post('/run/remove-space-members').send({
+      const res = await request(server).post('/run/remove-space-member').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
         fullSpaceName: 'Marketplace',
       });
       expect(res.status).toBe(500);
@@ -984,7 +1187,9 @@ describe('createApp', () => {
     });
     await listen(server);
     try {
-      const res = await request(server).post('/run/remove-space-members').send({
+      const res = await request(server).post('/run/remove-space-member').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
         fullSpaceName: 'Marketplace',
       });
       expect(res.status).toBe(200);

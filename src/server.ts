@@ -10,6 +10,7 @@ import { launchBrowser as defaultLaunchBrowser } from './utils/browser.js';
 import {
   removeSpaceMembers as defaultRemoveSpaceMembers,
   SPACE_IDS,
+  NOT_IN_SPACE,
 } from './tasks/removeSpaceMembers.js';
 import { addSpaceMember as defaultAddSpaceMember } from './tasks/addSpaceMember.js';
 import { sendRunLogEmail as defaultSendRunLogEmail } from './email.js';
@@ -46,6 +47,46 @@ import cron from 'node-cron';
 const publicDir = path.join(process.cwd(), 'public');
 const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36';
+
+/**
+ * Hardcoded safety kill switch for the bulk-removal endpoints.
+ *
+ * When `true` (the default), POST /run/remove-space-members and
+ * POST /run/remove-all-space-members short-circuit before any
+ * payload validation, browser launch, or scheduler interaction and
+ * respond with HTTP 403 + a self-describing JSON body.
+ *
+ * This is a deliberately code-level constant (not an env var) so
+ * re-enabling the bulk paths requires a reviewed source change and
+ * a redeploy — not a runtime flag flip — which is the right level
+ * of friction for "delete every non-admin member from a Commons
+ * space" or "delete every non-admin member from every space".
+ *
+ * To re-enable:
+ *   1. Set `BULK_REMOVE_DISABLED = false` here in src/server.ts.
+ *   2. Run the test suite (`npm test`) and verify the disabled
+ *      endpoint tests are updated to reflect the new state.
+ *   3. Commit, deploy, restart the service.
+ *
+ * The single-member remove endpoints (`/run/remove-space-member`
+ * and `/run/remove-space-member-all-spaces`) are NOT gated by this
+ * switch — targeted removals respect operator intent and are still
+ * needed for ordinary moderation (e.g. deleting a single account).
+ */
+const BULK_REMOVE_DISABLED = true;
+
+/**
+ * Standard error body returned by the disabled bulk-remove
+ * endpoints. Centralised so both endpoints emit the same shape and
+ * tests can assert against the constant rather than a literal.
+ */
+const BULK_REMOVE_DISABLED_BODY = Object.freeze({
+  error: 'Bulk member removal is disabled.',
+  detail:
+    'POST /run/remove-space-members and POST /run/remove-all-space-members are intentionally disabled as a safety guard. ' +
+    'Use POST /run/remove-space-member or POST /run/remove-space-member-all-spaces (with fullMemberName + memberId) ' +
+    'to remove a specific member instead. To re-enable bulk removal, set BULK_REMOVE_DISABLED = false in src/server.ts and redeploy.',
+});
 
 /**
  * Generic cron-env-var resolver.
@@ -257,6 +298,15 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
   // ---------------------------------------------------------------------------
 
   app.post('/run/remove-space-members', async (req: Request, res: Response) => {
+    /* Safety kill switch — see BULK_REMOVE_DISABLED at the top of
+     * this file. Returned BEFORE any payload validation, browser
+     * launch, or scheduler interaction so a stray request can't
+     * tie up the exclusive task lock or leak a Chromium process. */
+    if (BULK_REMOVE_DISABLED) {
+      res.status(403).json(BULK_REMOVE_DISABLED_BODY);
+      return;
+    }
+
     const body = req.body as Record<string, unknown>;
     const space = requireStringField(body, 'fullSpaceName');
     if (!space.ok) { res.status(400).json({ error: space.error }); return; }
@@ -289,6 +339,16 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
   // ---------------------------------------------------------------------------
 
   app.post('/run/remove-all-space-members', async (req: Request, res: Response) => {
+    /* Safety kill switch — see BULK_REMOVE_DISABLED at the top of
+     * this file. The all-spaces variant is the most destructive
+     * endpoint in the system; returning early protects against
+     * accidental clicks even more strongly than the single-space
+     * bulk endpoint. */
+    if (BULK_REMOVE_DISABLED) {
+      res.status(403).json(BULK_REMOVE_DISABLED_BODY);
+      return;
+    }
+
     const body = req.body as Record<string, unknown>;
     const headless = parseHeadless(body);
     if (!headless.ok) { res.status(400).json({ error: headless.error }); return; }
@@ -325,6 +385,120 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
         return { totalRemoved, spaces: results };
       },
       summarize: (r) => `${r.totalRemoved} removed across ${r.spaces.length} spaces`,
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // /run/remove-space-member (specific member, single space)
+  // ---------------------------------------------------------------------------
+
+  /* Targeted removal mirrors the Add side: caller supplies
+   * fullMemberName + memberId + fullSpaceName, the underlying task is
+   * the same `removeSpaceMembers` (now with optional target fields)
+   * but short-circuited to one row. NOT_IN_SPACE in the response is
+   * surfaced to the operator as a no-op success rather than a
+   * failure, since that's the consent-respecting interpretation. */
+  app.post('/run/remove-space-member', async (req: Request, res: Response) => {
+    const body = req.body as Record<string, unknown>;
+    const fullMemberName = requireStringField(body, 'fullMemberName');
+    if (!fullMemberName.ok) { res.status(400).json({ error: fullMemberName.error }); return; }
+    const memberId = requireStringField(body, 'memberId');
+    if (!memberId.ok) { res.status(400).json({ error: memberId.error }); return; }
+    const fullSpaceName = requireStringField(body, 'fullSpaceName');
+    if (!fullSpaceName.ok) { res.status(400).json({ error: fullSpaceName.error }); return; }
+    const headless = parseHeadless(body);
+    if (!headless.ok) { res.status(400).json({ error: headless.error }); return; }
+    const dryRun = parseDryRun(body);
+    if (!dryRun.ok) { res.status(400).json({ error: dryRun.error }); return; }
+
+    await runExclusiveBrowserTask(res, {
+      name: `removeSpaceMember "${fullMemberName.value}" from "${fullSpaceName.value}"${dryRun.value ? ' (dry run)' : ''}`,
+      headless: headless.value,
+      run: async (ctx) =>
+        deps.removeSpaceMembers({
+          page: ctx.page,
+          fullSpaceName: fullSpaceName.value,
+          dryRun: dryRun.value,
+          log: ctx.log,
+          abortSignal: ctx.abortSignal,
+          sleep: ctx.sleep,
+          targetMemberId: memberId.value,
+          targetMemberName: fullMemberName.value,
+        }),
+      summarize: (r) => {
+        if (!r.success) return `failed — ${r.error ?? 'unknown error'}`;
+        if (r.error === NOT_IN_SPACE) return 'not in space (no-op)';
+        return r.removed === 1 ? 'removed' : 'no-op';
+      },
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // /run/remove-space-member-all-spaces (specific member, every space)
+  // ---------------------------------------------------------------------------
+
+  /* Mirrors `/run/remove-all-space-members` but for a single member.
+   * Each space is processed sequentially in the same browser tab; a
+   * NOT_IN_SPACE result for any one space is counted as a "skipped"
+   * (member already absent), not a failure, since the operator's
+   * intent — "this member should be in zero Commons spaces" — is
+   * still satisfied per-space. */
+  app.post('/run/remove-space-member-all-spaces', async (req: Request, res: Response) => {
+    const body = req.body as Record<string, unknown>;
+    const fullMemberName = requireStringField(body, 'fullMemberName');
+    if (!fullMemberName.ok) { res.status(400).json({ error: fullMemberName.error }); return; }
+    const memberId = requireStringField(body, 'memberId');
+    if (!memberId.ok) { res.status(400).json({ error: memberId.error }); return; }
+    const headless = parseHeadless(body);
+    if (!headless.ok) { res.status(400).json({ error: headless.error }); return; }
+    const dryRun = parseDryRun(body);
+    if (!dryRun.ok) { res.status(400).json({ error: dryRun.error }); return; }
+
+    await runExclusiveBrowserTask(res, {
+      name: `removeSpaceMember "${fullMemberName.value}" from ALL spaces${dryRun.value ? ' (dry run)' : ''}`,
+      headless: headless.value,
+      run: async (ctx) => {
+        const spaceNames = Object.keys(SPACE_IDS);
+        const results: Array<{
+          space: string;
+          success: boolean;
+          removed: number;
+          error?: string;
+          skipped?: boolean;
+        }> = [];
+
+        for (const spaceName of spaceNames) {
+          if (ctx.abortSignal.aborted) {
+            ctx.log(`Abort requested — skipping remaining spaces.`);
+            break;
+          }
+          ctx.log(`\n═══ Processing space: ${spaceName} ═══`);
+          const result = await deps.removeSpaceMembers({
+            page: ctx.page,
+            fullSpaceName: spaceName,
+            dryRun: dryRun.value,
+            log: ctx.log,
+            abortSignal: ctx.abortSignal,
+            sleep: ctx.sleep,
+            targetMemberId: memberId.value,
+            targetMemberName: fullMemberName.value,
+          });
+          const skipped = result.success && result.error === NOT_IN_SPACE;
+          results.push({ space: spaceName, ...result, skipped });
+          if (skipped) ctx.log(`• ${spaceName}: not in space (skipped).`);
+          else if (result.success) ctx.log(`✓ ${spaceName}: ${result.removed} removed.`);
+          else ctx.log(`✗ ${spaceName}: ${result.error ?? 'unknown error'}`);
+        }
+
+        const totalRemoved = results.reduce((sum, r) => sum + r.removed, 0);
+        const skippedCount = results.filter((r) => r.skipped).length;
+        const failureCount = results.filter((r) => !r.success).length;
+        return { totalRemoved, skippedCount, failureCount, spaces: results };
+      },
+      summarize: (r) =>
+        `${r.totalRemoved} removed across ${r.spaces.length} spaces` +
+        (r.skippedCount ? `, ${r.skippedCount} not in space` : '') +
+        (r.failureCount ? `, ${r.failureCount} failed` : ''),
     });
   });
 

@@ -128,6 +128,25 @@ same `TaskScheduler` as IMAP. Optional `RECONCILE_COMMONS_CRON`; manual
   exposes `ineligibleMembers` at the top level so the dashboard can
   render a read-only panel.
 
+**Stage 4h overlay (bulk-remove kill switch):**
+- `BULK_REMOVE_DISABLED` is a hardcoded `true` in `src/server.ts`.
+  When set, `POST /run/remove-space-members` and
+  `POST /run/remove-all-space-members` short-circuit with HTTP 403
+  + a self-describing JSON body BEFORE any payload validation,
+  browser launch, or scheduler interaction. The targeted
+  `/run/remove-space-member` and `/run/remove-space-member-all-spaces`
+  endpoints are NOT gated — moderation of individual members is
+  still needed and is operator-driven.
+- Deliberately a code-level constant (not an env var) so
+  re-enabling requires a reviewed source change + redeploy. The
+  response `detail` field tells the operator exactly what to flip
+  (`set BULK_REMOVE_DISABLED = false in src/server.ts`).
+- The admin UI's "ALL Members" checkbox + "Remove From …" buttons
+  are intentionally left in place. Clicking them now surfaces the
+  403 message in the result panel, which doubles as live
+  documentation: operators see what's disabled and how to ask for
+  it back.
+
 ### Stage 4d: Admin UI -- DONE
 
 - **`GET /status/agreements`** — JSON rollup: SQLite `AgreementsOverview` + configured `AGREEMENT_ARTICLES`

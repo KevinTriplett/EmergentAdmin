@@ -1,6 +1,7 @@
 import type { Page } from 'puppeteer';
 import { loginIfNeeded, type LogFn } from '../auth.js';
 import { SPACE_IDS } from './removeSpaceMembers.js';
+import { dumpFailureDiagnostics } from '../utils/diagnostics.js';
 
 // === CSS SELECTORS — UPDATE THESE IF MN CHANGES ITS DOM ===
 const SEL_READY = 'body.pace-done #community-app';
@@ -526,6 +527,24 @@ export async function addSpaceMember({
     await log(msg.added(fullMemberName, fullSpaceName));
     return { success: true };
   } catch (err) {
+    /* Diagnostics-first: capture what MN/Cloudflare was serving at the
+     * moment of failure before we throw away the page. The dumper is
+     * non-throwing by design (see `src/utils/diagnostics.ts`), so any
+     * failure here can never mask the real error message we return
+     * to the caller. We deliberately await it: writing a few hundred
+     * KB before we surface the error is well worth it for a failure
+     * that the operator currently can only debug from prod logs. */
+    await dumpFailureDiagnostics(
+      page,
+      {
+        reason: 'add-space-member-failed',
+        fullMemberName,
+        memberId,
+        fullSpaceName,
+        error: err,
+      },
+      log,
+    );
     const message = err instanceof Error ? err.message : String(err);
     return logErrorAndFail(log, message);
   }

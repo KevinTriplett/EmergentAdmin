@@ -72,6 +72,11 @@ export const INELIGIBLE_MEMBERS: ReadonlyArray<IneligibleMember> = [
     memberId: '16933091',
     fullName: 'Charles Blake',
     reason: 'repeated patterns of not willing to engage with conflict resolution and relationality'
+  },
+  {
+    memberId: '17952620',
+    fullName: 'Don Salmon',
+    reason: 'Testing ineligibility list'
   }
 ];
 

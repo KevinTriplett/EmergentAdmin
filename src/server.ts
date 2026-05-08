@@ -30,6 +30,11 @@ import {
   type PollResult,
 } from './ingestion/imapPoller.js';
 import { AGREEMENT_ARTICLES, REQUIRED_AGREEMENT_COUNT, type AgreementArticle } from './config/agreements.js';
+import {
+  INELIGIBLE_MEMBERS,
+  isMemberIneligible,
+  getIneligibilityReason,
+} from './config/ineligibleMembers.js';
 import { buildAddToAllSpacesJob, ALREADY_A_MEMBER } from './tasks/addToAllSpacesJob.js';
 import { enqueueCommonsMembershipRepairJobs } from './tasks/membershipReconcile.js';
 import {
@@ -338,6 +343,21 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
     const headless = parseHeadless(body);
     if (!headless.ok) { res.status(400).json({ error: headless.error }); return; }
 
+    /* Ineligibility gate: a member on `src/config/ineligibleMembers.ts`
+     * cannot be added via the manual single-space endpoint either.
+     * No `force` override here — the operator must remove the entry
+     * and redeploy to re-enable adding (per the consent design;
+     * `force: true` on the all-spaces endpoint only bypasses the
+     * Stage 4g per-(member, space) ledger, not this gate). */
+    if (isMemberIneligible(memberId.value)) {
+      res.status(403).json({
+        error: 'member is marked ineligible for Commons-space membership',
+        memberId: memberId.value,
+        reason: getIneligibilityReason(memberId.value),
+      });
+      return;
+    }
+
     await runExclusiveBrowserTask(res, {
       name: `addSpaceMember "${fullMemberName.value}" → "${fullSpaceName.value}"`,
       headless: headless.value,
@@ -373,6 +393,21 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
     const force = parseForce(body);
     if (!force.ok) { res.status(400).json({ error: force.error }); return; }
 
+    /* Ineligibility gate. `force: true` deliberately does NOT bypass
+     * this — `force` is the Stage 4g override for "re-add a member
+     * who left a space we previously added them to", which only
+     * makes sense for an eligible member. To unblock an ineligible
+     * member the operator must remove the entry from
+     * `src/config/ineligibleMembers.ts` and redeploy. */
+    if (isMemberIneligible(memberId.value)) {
+      res.status(403).json({
+        error: 'member is marked ineligible for Commons-space membership',
+        memberId: memberId.value,
+        reason: getIneligibilityReason(memberId.value),
+      });
+      return;
+    }
+
     const job = buildAddToAllSpacesJob(
       { addSpaceMember: deps.addSpaceMember, store: deps.agreementsStore },
       { fullMemberName: fullMemberName.value, memberId: memberId.value, force: force.value },
@@ -390,15 +425,46 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
     app.get('/status/agreements', (_req: Request, res: Response) => {
       const store = deps.agreementsStore!;
       const dbOverview = store.getAgreementsOverview();
+
+      /* Filter ineligibles out of the operator-actionable list and
+       * count. We compute the count from the FULL not-yet-added
+       * list (not the limited slice in `dbOverview`), so the
+       * counter stays correct when the underlying eligibility set
+       * exceeds the dashboard's display cap (default 250). The
+       * pre-filter total is preserved as
+       * `eligibleNotYetAddedTotalIncludingIneligible` for
+       * diagnostics — handy to confirm the gate is doing what the
+       * operator expects without re-querying SQLite. */
+      const fullEligibleNotYet = store.listMembersEligibleNotYetCommonsAdded();
+      const ineligibleAndEligibleCount = fullEligibleNotYet.reduce(
+        (n, m) => (isMemberIneligible(m.memberId) ? n + 1 : n),
+        0,
+      );
+      const eligibleNotYetAddedActionable = dbOverview.eligibleNotYetAddedMembers.filter(
+        (m) => !isMemberIneligible(m.memberId),
+      );
+      const filteredOverview = {
+        ...dbOverview,
+        eligibleNotYetAddedMembers: eligibleNotYetAddedActionable,
+        eligibleNotYetAddedCount:
+          dbOverview.eligibleNotYetAddedCount - ineligibleAndEligibleCount,
+        eligibleNotYetAddedTotalIncludingIneligible: dbOverview.eligibleNotYetAddedCount,
+      };
+
       const imap = deps.agreementsImapSnapshot?.() ?? null;
       res.status(200).json({
-        db: dbOverview,
+        db: filteredOverview,
         imap,
         configuredAgreementArticles: AGREEMENT_ARTICLES.map((a) => ({
           articleId: a.articleId,
           spaceId: a.spaceId,
           title: a.title,
           url: a.url,
+        })),
+        ineligibleMembers: INELIGIBLE_MEMBERS.map((m) => ({
+          memberId: m.memberId,
+          fullName: m.fullName,
+          reason: m.reason,
         })),
       });
     });

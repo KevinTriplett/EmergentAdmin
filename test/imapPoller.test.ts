@@ -386,4 +386,54 @@ describe('imapPoller', () => {
      * so not seeing again avoids double-claim attempts. Both UIDs seen. */
     expect(imap.markSeenUids()).toEqual(expect.arrayContaining([10, 11]));
   });
+
+  it('records the agreement but does NOT enqueue when the member is ineligible', async () => {
+    /* Stage 4g+: an at-threshold agreement from a member on the
+     * ineligibility list still lands in the store (so the audit
+     * trail and counts stay accurate) but the auto-add is suppressed
+     * with a SKIPPED log line. The reconcile path has its own gate
+     * and would also skip; this test only covers the IMAP path. */
+    const enqueueAddAllSpaces = vi.fn();
+    const logLines: string[] = [];
+
+    const messages: FetchedMessage[] = [];
+    for (let i = 0; i < 8; i++) {
+      messages.push(
+        await fakeFetched(
+          buildRawEmail({
+            messageId: `inelig-${i}@mn.co`,
+            memberId: '70001',
+            memberName: 'Inelig Member',
+            articleId: TEST_ARTICLES[i].articleId,
+            spaceId: TEST_ARTICLES[i].spaceId,
+            commentId: String(9000 + i),
+            commentText: 'I agree',
+          }),
+          300 + i,
+        ),
+      );
+    }
+
+    const imap = makeInMemoryImap(messages);
+    const poller = createImapPoller({
+      store,
+      openConnection: async () => imap.conn,
+      enqueueAddAllSpaces,
+      findAgreementArticle: testFindAgreementArticle,
+      isAgreementText: testIsAgreementText,
+      isMemberIneligible: (id) => id === '70001',
+      getIneligibilityReason: (id) => (id === '70001' ? 'test-reason' : null),
+      log: (m) => logLines.push(m),
+    });
+
+    const result = await poller.pollOnce();
+    expect(result.newAgreements).toBe(8);
+    expect(result.addsQueued).toBe(0);
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    expect(enqueueAddAllSpaces).not.toHaveBeenCalled();
+    expect(store.countAgreements('70001')).toBe(8);
+    expect(logLines.some((m) => m.includes('SKIPPED (ineligible: test-reason)'))).toBe(true);
+    /* All UIDs marked seen — ineligibility is not a failure. */
+    expect(imap.markSeenUids()).toHaveLength(8);
+  });
 });

@@ -326,6 +326,13 @@
       <label for="add-member-id">Member ID</label>
       <input type="text" id="add-member-id" placeholder="e.g. 12345678" autocomplete="off" inputmode="numeric" />
 
+      <div class="row">
+        <label
+          ><input type="checkbox" id="chk-force-add" /> Force re-add
+          <span id="force-hint" class="dry-hint">(bypass the per-space "added once" gate; use only when the member explicitly asked to be re-added)</span></label
+        >
+      </div>
+
       <div class="actions" id="actions-add">
         <button type="button" class="primary" id="btn-add-all">Add To ALL Spaces</button>
         <button type="button" class="danger btn-abort-inline" id="btn-abort-add" hidden>Abort</button>
@@ -375,6 +382,7 @@
         const spaceSelect = document.getElementById('space-select');
         const chkHeadless = document.getElementById('chk-headless');
         const chkDry = document.getElementById('chk-dry');
+        const chkForceAdd = document.getElementById('chk-force-add');
         const dryHint = document.getElementById('dry-hint');
         const actionsRemove = document.getElementById('actions-remove');
         const actionsAdd = document.getElementById('actions-add');
@@ -589,6 +597,48 @@
               escapeHtml(String(d.inProgressMemberCount)) +
               '.</p>';
 
+          /* Ineligible-members panel: read-only mirror of the
+           * server's `src/config/ineligibleMembers.ts`. The list is
+           * not editable from the UI by design; managing it
+           * requires a code change + redeploy (the consent
+           * decision is durable enough to want the audit trail of
+           * a git commit). The panel is hidden when the list is
+           * empty so the operator only sees it when it matters. */
+          const inelig = Array.isArray(data.ineligibleMembers) ? data.ineligibleMembers : [];
+          let ineligUl =
+            '<ul class="agreements-dash-list">' +
+            memberRows(inelig, function (row) {
+              const reason = row.reason ? ' • ' + escapeHtml(String(row.reason)) : '';
+              return (
+                '<li>' +
+                escapeHtml(String(row.fullName)) +
+                ' <span style="opacity:0.8">• id ' +
+                escapeHtml(String(row.memberId)) +
+                reason +
+                '</span></li>'
+              );
+            }) +
+            '</ul>';
+          const ineligSection =
+            inelig.length === 0
+              ? ''
+              : '<h3>Ineligible members (excluded from auto-add)</h3>' +
+                '<p class="agreements-dash-note">Configured in <code>src/config/ineligibleMembers.ts</code>; redeploy after edits.</p>' +
+                ineligUl;
+
+          /* If any ineligibles also crossed the agreement
+           * threshold, surface the discrepancy between the
+           * actionable count (what reconcile will pick up) and
+           * the raw count (everyone at threshold without
+           * commons_added_at). Quietly omit otherwise. */
+          const totalIncl = d.eligibleNotYetAddedTotalIncludingIneligible;
+          const ineligNote =
+            typeof totalIncl === 'number' && totalIncl !== eligNotYetCount
+              ? '<p class="agreements-dash-note">' +
+                escapeHtml(String(totalIncl - eligNotYetCount)) +
+                ' member(s) at threshold are excluded from this list as ineligible (see panel below).</p>'
+              : '';
+
           return (
             '<h3>Agreement database</h3>' +
             '<dl class="stat-grid">' +
@@ -620,9 +670,11 @@
             '</ul>' +
             imapHtml +
             '<h3>Eligible, not yet added to Commons</h3>' +
+            ineligNote +
             eligUl +
             '<h3>In progress toward threshold</h3>' +
-            progUl
+            progUl +
+            ineligSection
 
 
           );
@@ -914,11 +966,22 @@
             addMemberId.focus();
             return;
           }
-          if (!confirm('Add "' + name + '" (ID ' + id + ') to ALL spaces?')) return;
+          /* Stage 4g: when force is checked, surface that in the
+           * confirm dialog so the operator has one last chance to
+           * notice they're bypassing the "added once" consent gate.
+           * The server-side ineligibility gate is NOT bypassed by
+           * force; that's intentional, see ineligibleMembers.ts. */
+          const force = !!(chkForceAdd && chkForceAdd.checked);
+          const promptMessage = force
+            ? 'FORCE re-add "' + name + '" (ID ' + id + ') to ALL spaces? ' +
+              'This bypasses the per-space "added once" gate. Use only when the member explicitly asked to be re-added.'
+            : 'Add "' + name + '" (ID ' + id + ') to ALL spaces?';
+          if (!confirm(promptMessage)) return;
           runTask('add', '/run/add-space-member-all-spaces', {
             fullMemberName: name,
             memberId: id,
             headless: chkHeadless.checked,
+            force: force,
           });
         });
 

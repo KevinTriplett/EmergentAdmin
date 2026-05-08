@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import http from 'node:http';
 import type { Server } from 'node:http';
@@ -1017,6 +1017,171 @@ describe('createApp', () => {
       expect(failed.error).toMatch(/toast/i);
     } finally {
       await closeServer(server);
+    }
+  });
+});
+
+/**
+ * The ineligibility list is loaded statically at module load
+ * (`src/config/ineligibleMembers.ts`), so the only clean test seam
+ * is `vi.doMock` + dynamic re-import of `createApp`. This isolated
+ * describe block uses `vi.resetModules()` per test so the rest of
+ * the suite keeps the empty default list.
+ */
+describe('ineligibility gate (server)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.doUnmock('../src/config/ineligibleMembers.js');
+  });
+
+  async function loadAppWithIneligibles(
+    ineligibles: Array<{ memberId: string; fullName: string; reason: string }>,
+  ): Promise<typeof import('../src/server.js')> {
+    vi.doMock('../src/config/ineligibleMembers.js', () => {
+      const byId = new Map(ineligibles.map((m) => [m.memberId, m]));
+      return {
+        INELIGIBLE_MEMBERS: ineligibles,
+        isMemberIneligible: (id: string) => byId.has(id),
+        getIneligibilityReason: (id: string) => byId.get(id)?.reason ?? null,
+      };
+    });
+    return await import('../src/server.js');
+  }
+
+  it('returns 403 on /run/add-space-member-all-spaces for an ineligible member', async () => {
+    const { createApp: createAppMocked } = await loadAppWithIneligibles([
+      { memberId: '12345', fullName: 'Jane Doe', reason: 'banned 2026' },
+    ]);
+    const launchBrowser = vi.fn();
+    const addSpaceMember = vi.fn();
+    const removeSpaceMembers = vi.fn();
+    const server = createAppMocked({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/add-space-member-all-spaces').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
+      });
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({
+        memberId: '12345',
+        reason: 'banned 2026',
+      });
+      expect(launchBrowser).not.toHaveBeenCalled();
+      expect(addSpaceMember).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('force=true does NOT bypass ineligibility', async () => {
+    const { createApp: createAppMocked } = await loadAppWithIneligibles([
+      { memberId: '12345', fullName: 'Jane Doe', reason: 'banned 2026' },
+    ]);
+    const launchBrowser = vi.fn();
+    const addSpaceMember = vi.fn();
+    const removeSpaceMembers = vi.fn();
+    const server = createAppMocked({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/add-space-member-all-spaces').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
+        force: true,
+      });
+      expect(res.status).toBe(403);
+      expect(launchBrowser).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('returns 403 on /run/add-space-member (single space) for an ineligible member', async () => {
+    const { createApp: createAppMocked } = await loadAppWithIneligibles([
+      { memberId: '99999', fullName: 'Blocked Person', reason: 'duplicate account' },
+    ]);
+    const launchBrowser = vi.fn();
+    const addSpaceMember = vi.fn();
+    const removeSpaceMembers = vi.fn();
+    const server = createAppMocked({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/add-space-member').send({
+        fullMemberName: 'Blocked Person',
+        memberId: '99999',
+        fullSpaceName: '8. Miscellaneous',
+      });
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({
+        memberId: '99999',
+        reason: 'duplicate account',
+      });
+      expect(launchBrowser).not.toHaveBeenCalled();
+      expect(addSpaceMember).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('GET /status/agreements filters ineligibles from actionable list and exposes ineligibleMembers', async () => {
+    const { createApp: createAppMocked } = await loadAppWithIneligibles([
+      { memberId: 'banned-1', fullName: 'Banned Bob', reason: 'codeofconduct' },
+    ]);
+    const { openAgreementsStore: openStore } = await import('../src/state/agreementsStore.js');
+
+    const store = openStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    /* Both members reach threshold; only the ineligible one should
+     * be filtered out of the actionable list, but their raw count
+     * is preserved in the diagnostic field. */
+    store.recordAgreement({
+      memberId: 'banned-1',
+      fullName: 'Banned Bob',
+      articleId: 'a1',
+      commentId: 'c1',
+      commentedAt: 1,
+      source: 'email',
+    });
+    store.recordAgreement({
+      memberId: 'ok-1',
+      fullName: 'Ok Olive',
+      articleId: 'a1',
+      commentId: 'c2',
+      commentedAt: 1,
+      source: 'email',
+    });
+
+    const launchBrowser = vi.fn();
+    const addSpaceMember = vi.fn();
+    const removeSpaceMembers = vi.fn();
+    const server = createAppMocked({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+    });
+    await listen(server);
+    try {
+      const res = await request(server).get('/status/agreements');
+      expect(res.status).toBe(200);
+
+      const ids = res.body.db.eligibleNotYetAddedMembers.map(
+        (m: { memberId: string }) => m.memberId,
+      );
+      expect(ids).toContain('ok-1');
+      expect(ids).not.toContain('banned-1');
+
+      expect(res.body.db.eligibleNotYetAddedCount).toBe(1);
+      expect(res.body.db.eligibleNotYetAddedTotalIncludingIneligible).toBe(2);
+
+      expect(res.body.ineligibleMembers).toEqual([
+        { memberId: 'banned-1', fullName: 'Banned Bob', reason: 'codeofconduct' },
+      ]);
+    } finally {
+      await closeServer(server);
+      store.close();
     }
   });
 });

@@ -9,6 +9,10 @@ import {
   isAgreementText as defaultIsAgreementText,
   type AgreementArticle,
 } from '../config/agreements.js';
+import {
+  isMemberIneligible as defaultIsMemberIneligible,
+  getIneligibilityReason as defaultGetIneligibilityReason,
+} from '../config/ineligibleMembers.js';
 
 /**
  * The IMAP poller is the live ingestion path for Stage 4a. Every N minutes
@@ -57,6 +61,19 @@ export type ImapPollerDeps = {
   findAgreementArticle?: (articleId: string) => AgreementArticle | null;
   /** Injectable for tests. Defaults to the production `AGREE_PATTERN` matcher. */
   isAgreementText?: (text: string) => boolean;
+  /**
+   * Injectable for tests. Defaults to the production
+   * `INELIGIBLE_MEMBERS` lookup. Returns `true` for memberIds that
+   * must NOT be auto-enqueued for an add-all-spaces job, regardless
+   * of agreement count.
+   */
+  isMemberIneligible?: (memberId: string) => boolean;
+  /**
+   * Injectable for tests. Returns the human-readable reason text for
+   * an ineligible member (used in the "skipped" log line), or null
+   * for eligible members.
+   */
+  getIneligibilityReason?: (memberId: string) => string | null;
   log?: (message: string) => void;
 };
 
@@ -80,6 +97,8 @@ export function createImapPoller(deps: ImapPollerDeps): ImapPoller {
   const log = deps.log ?? (() => undefined);
   const findAgreementArticle = deps.findAgreementArticle ?? defaultFindAgreementArticle;
   const isAgreementText = deps.isAgreementText ?? defaultIsAgreementText;
+  const isMemberIneligible = deps.isMemberIneligible ?? defaultIsMemberIneligible;
+  const getIneligibilityReason = deps.getIneligibilityReason ?? defaultGetIneligibilityReason;
   let timer: NodeJS.Timeout | null = null;
   let polling = false;
 
@@ -192,23 +211,43 @@ export function createImapPoller(deps: ImapPollerDeps): ImapPoller {
       else result.duplicates += 1;
 
       if (deps.store.claimAddForMember(parsed.memberId)) {
-        try {
-          deps.enqueueAddAllSpaces({
-            memberId: parsed.memberId,
-            fullName: parsed.fullName,
-          });
-          result.addsQueued += 1;
-          log(`imapPoller: member ${parsed.fullName} (${parsed.memberId}) reached required agreements - add-all-spaces enqueued`);
-        } catch (err) {
-          /* If enqueue somehow fails we leave the member marked as added
-           * so we don't quickly repeat. Stage 4c reconciliation will catch
-           * any subsequent gap. Admin is warned via log + email. */
-          result.errors += 1;
+        /* Ineligibility gate: the agreement is recorded and the
+         * dedup claim has fired (so we don't churn this code path
+         * on every subsequent agreement from the same member), but
+         * we deliberately do NOT enqueue the add-all-spaces job.
+         * The reconcile pass also filters against this list, so
+         * removing the entry + redeploy is the recovery path. The
+         * fallthrough at the end of processMessage still calls
+         * markEmailProcessed for this UID. */
+        if (isMemberIneligible(parsed.memberId)) {
+          const reason = getIneligibilityReason(parsed.memberId) ?? 'unspecified';
           log(
-            `imapPoller: enqueueAddAllSpaces threw for ${parsed.memberId}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
+            `imapPoller: member ${parsed.fullName} (${parsed.memberId}) reached required agreements - SKIPPED (ineligible: ${reason})`,
           );
+          /* The "skipped" counter already exists for the parser's
+           * irrelevant-message path. Reusing it here means a single
+           * counter for "we saw this and chose not to act on it",
+           * which is the right summary for the operator. */
+          result.skipped += 1;
+        } else {
+          try {
+            deps.enqueueAddAllSpaces({
+              memberId: parsed.memberId,
+              fullName: parsed.fullName,
+            });
+            result.addsQueued += 1;
+            log(`imapPoller: member ${parsed.fullName} (${parsed.memberId}) reached required agreements - add-all-spaces enqueued`);
+          } catch (err) {
+            /* If enqueue somehow fails we leave the member marked as added
+             * so we don't quickly repeat. Stage 4c reconciliation will catch
+             * any subsequent gap. Admin is warned via log + email. */
+            result.errors += 1;
+            log(
+              `imapPoller: enqueueAddAllSpaces threw for ${parsed.memberId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
         }
       }
     } else {

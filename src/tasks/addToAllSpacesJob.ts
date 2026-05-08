@@ -131,7 +131,7 @@ export function buildAddToAllSpacesJob(
         }
 
         if (presentSpaces.has(spaceName)) {
-          ctx.log(`• ${spaceName}: already verified present in DB; skipping.`);
+          ctx.log(`• ${spaceName}: ${input.fullMemberName} already verified present in DB; skipping.`);
           results.push({ space: spaceName, success: true, error: ALREADY_A_MEMBER, skipped: true });
           skippedCount += 1;
           phase1VerifiedCount += 1;

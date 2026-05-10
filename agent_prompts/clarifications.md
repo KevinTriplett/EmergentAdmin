@@ -41,13 +41,13 @@ SEL_MODAL_CONFIRM = '#modal-content-region .modal-confirm-button'
 SEL_MODAL_CANCEL = '#modal-content-region .modal-reject-button'
 SEL_MODAL_REGION = '#modal-content-region'
 SEL_NAME_TH = "[title='Member Name']"
-SEL_NAME_TD = `td:nth-child(${colIndexName})`
-SEL_MEMBER_ID_TD
+SEL_NAME_TD(colIndexName) = `td:nth-child(${colIndexName})`
+SEL_MEMBER_ID_TD = `${SEL_NAME_TD(colIndexName)} a`
 SEL_JOINED_TH = "[title='Joined Network']"
-SEL_NAME_TD = `td:nth-child(${colIndexJoined})`
+SEL_JOINED_TD(colIndexJoined) = `td:nth-child(${colIndexJoined})`
 SEL_ACTIVE_TH = "[title='Last Active']"
-SEL_NAME_TD = `td:nth-child(${colIndexActive})`
-SEL_NAME_LI = ":has(+ [title='Name'])"
+SEL_ACTIVE_TD(colIndexActive) = `td:nth-child(${colIndexActive})`
+SEL_NAME_LI = ":has(+ [title='Name']) a"
 SEL_JOINED_LI = ":has(+ [title='Joined Network'])"
 SEL_ACTIVE_LI = ":has(+ [title='Last Active'])"
 SEL_SORTED_BY_DROPDOWN = '.sorted-by-region a.mighty-drop-down-toggle'
@@ -181,22 +181,33 @@ Consider these options and concerns and provide guidance.
 
 ### collectActiveMemberList
 
-Purpose: export to file the active member list from scraping the urlMembers page. The page is an infinite scroll and is either a table with columns or unordered list with divs nested within <li> elements, depending upon viewport size.
+Purpose: export to file the active member list. The task talks to MN's
+internal REST endpoint `GET https://emergent-commons.mn.co/api/web/v1/spaces/4747401/members/all`
+directly (with `?include_email=true&page=N&per_page=100&sort=last_visit_at&sort_order=desc`).
+The earlier selector-based DOM-scraping plan is **superseded**: MN's
+admin page is itself a thin wrapper around this API, and the
+infinite-scroll loader in the rendered DOM caps at ~50 rows under
+programmatic scroll, which made the scraping path unreliable. The
+single page-side `fetch(url, { credentials: 'include' })` reuses the
+session cookie established by visiting the rendered admin page once
+at the top of the run, so no token plumbing is required.
 
 Process:
 
-1. visit urlMembers
-1. determine whether SEL_TABLE_MEMBERS is a <table> or <ul> in order to use the correct SEL_ for each member iteration
-1. click the SEL_SORTED_BY_DROPDOWN
-1. click the SEL_SORTED_BY_LAST_ACTIVE
-1. wait for SEL_TABLE_MEMBERS to be re-rendered
-1. scroll SEL_TABLE_MEMBERS until finished (look for how this is done in other tasks)
-1. for each SEL_MEMBER_ROW starting with the first member
-    1. get the name via `textContent.trim()` using SEL_NAME_* (note: use SEL_NAME_TD for tables and SEL_NAME_LI for lists)
-    1. get the text-formatted date via `textContent.trim()` using SEL_JOINED_* (note: SEL_JOINED_TD or SEL_JOINED_LI)
-    1. get the text-formatted date via `textContent.trim()` using SEL_ACTIVE_* (note: SEL_ACTIVE_TD and SEL_ACTIVE_LI)
-    1. if either the SEL_ACTIVE date is more than 90 days prior to today's date or SEL_JOINED is more than 1 year prior to today's date, break out of the loop and discard this member's data
-1. write the data to a csv file in the public directory on the server with header row "NAME, JOINED, LAST ACTIVE"
+1. visit urlMembers (warms the session cookie; no data is read from the DOM)
+1. waitForSelector SEL_READY (interactive, cookies set)
+1. for each API page (1-indexed, `per_page=100`):
+    1. `page.evaluate(async (u) => fetch(u, { credentials: 'include' }))`
+    1. parse the array response and walk in order
+    1. for each member:
+        1. if `user.id` is in the EXCLUDED_MEMBER_IDS set (currently `[39358139]` — the Commons Keeper Admin bot account), skip and continue (counts toward `skipped`)
+        1. if `user.membership.created_at` < 1 year ago, skip and continue
+        1. if `user.network_last_visit_at === null`, break and discard (never-visited)
+        1. if `user.network_last_visit_at` < 90 days ago is FALSE (i.e. more than 90 days), break and discard
+        1. else keep
+    1. stop paginating when the page is empty, the page returned `< per_page` rows, a break decision fired, or `MAX_PAGES=1000` was reached
+1. after each page, log a one-time WARNING if the rows are not sorted descending by `last_visit_at` (insurance against MN silently changing the sort honour)
+1. write the kept rows to `data/active-members.csv` (header `NAME,MEMBER ID,JOINED,LAST ACTIVE`; dates rendered as `Apr 19, 2025`-style and quoted per RFC 4180), accessed via the token-gated `/downloads/active-members.csv` endpoint
 
 ### greetPotentialNewMembers
 

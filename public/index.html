@@ -294,6 +294,7 @@
       <button id="tab-agreements" type="button" class="tab" role="tab" aria-selected="true" aria-controls="panel-agreements" tabindex="0">Agreements</button>
       <button id="tab-add" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-add" tabindex="-1">Add<span class="tab-running-dot" data-tab-running></span></button>
       <button id="tab-remove" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-remove" tabindex="-1">Remove<span class="tab-running-dot" data-tab-running></span></button>
+      <button id="tab-members" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-members" tabindex="-1">Members<span class="tab-running-dot" data-tab-running></span></button>
     </div>
 
     <section id="panel-agreements" class="tabpanel" role="tabpanel" aria-labelledby="tab-agreements" tabindex="0">
@@ -400,6 +401,28 @@
       </div>
     </section>
 
+    <section id="panel-members" class="tabpanel" role="tabpanel" aria-labelledby="tab-members" tabindex="0" hidden>
+      <p class="agreements-intro">
+        Scrape the global admin members list (sorted by Last Active) and write
+        <code>data/active-members.csv</code> on the server. Only members with at least
+        1 year of tenure who have been active in the past 90 days are written. The
+        file is overwritten on every run; download via the token-protected link below
+        (set <code>ACTIVE_MEMBER_LIST_TOKEN</code> in <code>.env</code> to enable).
+      </p>
+
+      <div id="members-download" class="agreements-dash-note" aria-live="polite">
+        Loading download status…
+      </div>
+
+      <div class="actions" id="actions-members">
+        <button type="button" class="primary" id="btn-collect-members">
+          Generate active-members.csv
+        </button>
+        <button type="button" id="btn-download-members" disabled>Download CSV</button>
+        <button type="button" class="danger btn-abort-inline" id="btn-abort-members" hidden>Abort</button>
+      </div>
+    </section>
+
     <div class="log-header">
       <button type="button" id="btn-clear-log">Clear Log</button>
     </div>
@@ -416,6 +439,11 @@
         const btnAddAll = document.getElementById('btn-add-all');
         const btnAbortRemove = document.getElementById('btn-abort-remove');
         const btnAbortAdd = document.getElementById('btn-abort-add');
+        const btnAbortMembers = document.getElementById('btn-abort-members');
+        const btnCollectMembers = document.getElementById('btn-collect-members');
+        const btnDownloadMembers = document.getElementById('btn-download-members');
+        const actionsMembers = document.getElementById('actions-members');
+        const membersDownloadStatus = document.getElementById('members-download');
         const btnAgreementsRefresh = document.getElementById('btn-agreements-refresh');
         const btnAgreementsPoll = document.getElementById('btn-agreements-poll');
         const btnAgreementsCopyJson = document.getElementById('btn-agreements-copy-json');
@@ -444,9 +472,11 @@
          * Tracks which section initiated the currently-running task, so the
          * Abort button appears IN PLACE of the action buttons the user just
          * clicked rather than elsewhere on the page. Values: 'remove',
-         * 'add', or null when idle.
+         * 'add', 'members', or null when idle.
          */
         let runningSection = null;
+        /** Tokenised CSV download URL most recently returned by /downloads/active-members-link. */
+        let currentMembersDownloadUrl = null;
         /** True after /status/agreements loads IMAP watcher flags (production). */
         let agreementsImapPollAvailable = false;
         /** False when the last refresh got 404 (agreements store not mounted on this process). */
@@ -468,12 +498,16 @@
           btnRemoveAll.hidden = running;
           btnAddSelected.hidden = running;
           btnAddAll.hidden = running;
+          btnCollectMembers.hidden = running;
+          btnDownloadMembers.hidden = running;
           btnAbortRemove.hidden = section !== 'remove';
           btnAbortAdd.hidden = section !== 'add';
+          btnAbortMembers.hidden = section !== 'members';
           /* Collapse the non-initiating section's action row entirely so
            * the UI doesn't leave an empty strip where its buttons were. */
           actionsRemove.hidden = running && section !== 'remove';
           actionsAdd.hidden = running && section !== 'add';
+          actionsMembers.hidden = running && section !== 'members';
           syncTabRunningDots(section);
           syncAgreementsSectionControls();
         }
@@ -484,8 +518,10 @@
         function syncTabRunningDots(section) {
           const dotRemove = document.querySelector('#tab-remove [data-tab-running]');
           const dotAdd = document.querySelector('#tab-add [data-tab-running]');
+          const dotMembers = document.querySelector('#tab-members [data-tab-running]');
           if (dotRemove) dotRemove.classList.toggle('is-running', section === 'remove');
           if (dotAdd) dotAdd.classList.toggle('is-running', section === 'add');
+          if (dotMembers) dotMembers.classList.toggle('is-running', section === 'members');
         }
 
         function syncAgreementsSectionControls() {
@@ -876,8 +912,10 @@
               if (msg.type === 'log') {
                 appendLog(msg.message);
               } else if (msg.type === 'done') {
+                const wasMembers = runningSection === 'members';
                 setTaskRunning(null);
                 showResult('<strong>Done.</strong><pre>' + JSON.stringify(msg.result, null, 2) + '</pre>', false);
+                if (wasMembers) void refreshMembersDownloadLink();
               } else if (msg.type === 'error') {
                 setTaskRunning(null);
                 showResult('<strong>Error</strong><p>' + escapeHtml(msg.message) + '</p>', true);
@@ -908,6 +946,7 @@
         }
         btnAbortRemove.addEventListener('click', sendAbort);
         btnAbortAdd.addEventListener('click', sendAbort);
+        btnAbortMembers.addEventListener('click', sendAbort);
 
         async function runTask(section, endpoint, payload) {
           clearResult();
@@ -1156,6 +1195,72 @@
           });
         });
 
+        /* ---------------------------------------------------------
+         * Members tab
+         *
+         * Generate → POST /run/collect-active-member-list
+         * Download → click anchor with token-bearing URL fetched on
+         *            demand from /downloads/active-members-link, so
+         *            the token never appears in the static HTML.
+         * ------------------------------------------------------- */
+
+        async function refreshMembersDownloadLink() {
+          membersDownloadStatus.textContent = 'Loading download status…';
+          btnDownloadMembers.disabled = true;
+          currentMembersDownloadUrl = null;
+          try {
+            const res = await fetch('/downloads/active-members-link');
+            if (res.status === 404) {
+              membersDownloadStatus.textContent =
+                'Set ACTIVE_MEMBER_LIST_TOKEN in .env to enable downloads.';
+              return;
+            }
+            if (!res.ok) {
+              membersDownloadStatus.textContent =
+                'Could not load download status: HTTP ' + res.status + '.';
+              return;
+            }
+            const body = await res.json();
+            currentMembersDownloadUrl = body.url || null;
+            if (body.exists) {
+              membersDownloadStatus.textContent =
+                'Last generated: ' + (body.mtime || '(unknown)') + '.';
+              btnDownloadMembers.disabled = false;
+            } else {
+              membersDownloadStatus.textContent =
+                'CSV not generated yet — click Generate to produce one.';
+            }
+          } catch (e) {
+            membersDownloadStatus.textContent =
+              'Could not load download status: ' + (e && e.message ? e.message : String(e));
+          }
+        }
+
+        btnCollectMembers.addEventListener('click', function () {
+          if (
+            !confirm(
+              'Generate active-members.csv now? This walks the full members list and ' +
+                'overwrites the previous file.',
+            )
+          )
+            return;
+          runTask('members', '/run/collect-active-member-list', {
+            headless: chkHeadless.checked,
+          });
+        });
+
+        btnDownloadMembers.addEventListener('click', function () {
+          if (!currentMembersDownloadUrl) return;
+          /* Use a temp anchor with `download` so the browser saves the
+           * file under a sensible name regardless of server headers. */
+          const a = document.createElement('a');
+          a.href = currentMembersDownloadUrl;
+          a.download = 'active-members.csv';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        });
+
         btnAgreementsRefresh.addEventListener('click', function () {
           void refreshAgreementsStatus({ quiet: false });
         });
@@ -1337,6 +1442,12 @@
             const panel = document.getElementById(t.getAttribute('aria-controls'));
             if (panel) panel.hidden = !isActive;
           });
+          /* Refresh the Members download status whenever its tab becomes
+           * active so the operator sees the most-recent mtime / token-status
+           * on each visit, not just on initial page load. */
+          if (tabEl && tabEl.id === 'tab-members') {
+            void refreshMembersDownloadLink();
+          }
         }
 
         const tabList = document.querySelector('[role="tablist"]');

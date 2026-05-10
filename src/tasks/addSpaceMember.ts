@@ -2,6 +2,7 @@ import type { Page } from 'puppeteer';
 import { loginIfNeeded, type LogFn } from '../auth.js';
 import { SPACE_IDS } from './removeSpaceMembers.js';
 import { dumpFailureDiagnostics } from '../utils/diagnostics.js';
+import { domClick, waitForSelector, waitForVisible } from '../utils/page.js';
 
 // === CSS SELECTORS — UPDATE THESE IF MN CHANGES ITS DOM ===
 const SEL_READY = 'body.pace-done #community-app';
@@ -116,36 +117,11 @@ export type AddSpaceMemberResult = {
 // Primitives
 // ---------------------------------------------------------------------------
 
-async function waitForSelector(page: Page, selector: string, timeoutMs: number): Promise<void> {
-  await page.waitForFunction(
-    (sel) => document.querySelector(sel) !== null,
-    { timeout: timeoutMs },
-    selector,
-  );
-}
-
-/**
- * Wait for a selector to be present *and* visible (non-zero bounds, not
- * `display:none` / `visibility:hidden`). Needed when a trigger opens an
- * animated container: the inner element is often already in the DOM before
- * the animation begins, so a plain presence check returns a stale/hidden
- * instance that isn't yet interactable.
- */
-async function waitForVisible(page: Page, selector: string, timeoutMs: number): Promise<void> {
-  await page.waitForSelector(selector, { timeout: timeoutMs, visible: true });
-}
-
-/** DOM click on a selector. MN controls do not reliably respond to Puppeteer pointer clicks. */
-async function domClick(page: Page, selector: string, label: string): Promise<void> {
-  await waitForSelector(page, selector, WAIT_SHORT_MS);
-  const found = await page.evaluate((sel) => {
-    const el = document.querySelector(sel) as HTMLElement | null;
-    if (!el) return false;
-    el.click();
-    return true;
-  }, selector);
-  if (!found) throw new Error(`${label}: selector not found (${selector})`);
-}
+/* `waitForSelector` (presence), `waitForVisible` (presence + non-zero
+ * bounds), and `domClick` (wait-then-click) are now imported from
+ * `../utils/page.js`. Behaviorally identical to the previous local
+ * copies. The shared `domClick` defaults its wait budget to 15s,
+ * matching this file's `WAIT_SHORT_MS`. */
 
 /**
  * Type into an input using real keystrokes via Puppeteer's keyboard.

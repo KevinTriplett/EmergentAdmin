@@ -264,3 +264,78 @@ Rules:
 - Do not edit code until at least items 1–3 are answered.
 - Prefer one deterministic fix tied to confirmed behavior.
 - Avoid multi-level fallback accumulation without explicit user approval.
+
+## 11. Puppeteer `page.evaluate` Body Construction
+
+The body of any function passed to `page.evaluate(fn, …)` is serialized with `Function.prototype.toString` and shipped to the browser. It runs in the **page's** JS context, NOT the Node module's. Anything that depended on the module's lexical scope is gone.
+
+This project is run via `tsx` (which uses esbuild under the hood). esbuild's `keepNames: true` is the default, and it preserves `Function.prototype.name` by wrapping every **named** function in `__name(fn, "fnName")` at transform time. The `__name` helper itself is hoisted to the top of the *transformed Node module*. When the function body lands in the browser, `__name` is undefined and you get:
+
+```
+ReferenceError: __name is not defined
+```
+
+The rule (binding):
+
+1. **Inside any `page.evaluate` callback, do not declare nested named functions.**
+   - No `function foo(...) {...}` declarations.
+   - No `const foo = (...) => {...}` (const-bound arrows inherit the const's name and get `__name`-wrapped).
+   - No named function expressions: `const x = function bar() {...}`.
+   - No nested `class Foo {...}` declarations.
+
+2. **Inline anonymous arrows passed as call arguments ARE safe.**
+   - `arr.map((x) => …)`, `arr.findIndex((x) => …)`, `Array.from(nodes, (n) => …)` — these are anonymous in their argument position and esbuild does not name-wrap them.
+
+3. **If you need helper-like factoring inside the evaluate body**, use one of:
+   - Inline the body at each call site (preferred when there are 2–3 sites).
+   - Pass an array of inputs to `.map(...)` with an inline anonymous arrow, and destructure the result on the Node side.
+   - Pure imperative code with a `for` loop.
+
+4. **Cross-evaluate-body sharing is not allowed.** A helper defined in the Node module cannot be referenced from inside a `page.evaluate` body — by definition it isn't in the page's scope. If you need the same logic in two evaluate sites, either duplicate the inline body or accept it as a real cross-cutting concern and write a small `evalWithNameShim(page, fn, args)` wrapper that installs `globalThis.__name ??= (t) => t;` before eval'ing the user function source.
+
+### Bad
+
+```ts
+// ✗ Fails at runtime: ReferenceError: __name is not defined
+await page.evaluate(({ tableSel, attrs }) => {
+  const ths = Array.from(document.querySelectorAll(tableSel));
+  function indexOf(sel) {                       // ← named declaration
+    return ths.findIndex((th) => th.matches(sel));
+  }
+  return { a: indexOf(attrs.a), b: indexOf(attrs.b) };
+}, args);
+```
+
+```ts
+// ✗ Same trap — const-bound arrow is also name-wrapped.
+await page.evaluate((sel) => {
+  const find = (s) => document.querySelector(s);   // ← inferred name "find"
+  return find(sel)?.textContent ?? '';
+}, sel);
+```
+
+### Good
+
+```ts
+// ✓ Inline anonymous arrow on .map; no nested named functions.
+const [a, b] = await page.evaluate(({ tableSel, attrs }) => {
+  const ths = Array.from(document.querySelectorAll(tableSel));
+  return [attrs.a, attrs.b].map((sel) => ths.findIndex((th) => th.matches(sel)));
+}, { tableSel, attrs });
+```
+
+```ts
+// ✓ Imperative; no inner named binding at all.
+await page.evaluate((sel) => {
+  const el = document.querySelector(sel);
+  return el ? el.textContent ?? '' : '';
+}, sel);
+```
+
+### Pre-flight check before adding/editing a `page.evaluate` body
+
+- Does the body contain `function` keyword? Refactor to inline or `.map`/`.forEach` with inline anonymous arrows.
+- Does the body contain `const NAME = (…) => …` or `const NAME = function …`? Same — refactor.
+- Does the body reference an identifier defined outside the callback (other than the args destructure)? It will be `undefined` in the page; pass it through `args`.
+
+When in doubt, search the codebase for the existing `__name` warning comments (`src/auth.ts`, `src/tasks/collectActiveMemberList.ts` `readColumnIndices`) — those mark known-correct templates.

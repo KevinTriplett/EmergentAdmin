@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import type { Request, Response } from 'express';
+import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -13,6 +14,11 @@ import {
   NOT_IN_SPACE,
 } from './tasks/removeSpaceMembers.js';
 import { addSpaceMember as defaultAddSpaceMember } from './tasks/addSpaceMember.js';
+import { collectActiveMemberList as defaultCollectActiveMemberList } from './tasks/collectActiveMemberList.js';
+import {
+  activeMembersCsvPath,
+  tokensMatch,
+} from './utils/activeMemberList.js';
 import { sendRunLogEmail as defaultSendRunLogEmail } from './email.js';
 import {
   createTaskScheduler,
@@ -154,6 +160,11 @@ export type CreateAppDeps = {
   launchBrowser: (headless: boolean) => Promise<BrowserHandle>;
   removeSpaceMembers: typeof defaultRemoveSpaceMembers;
   addSpaceMember: typeof defaultAddSpaceMember;
+  /**
+   * Optional so existing tests that omit it don't break. At runtime the real
+   * `collectActiveMemberList` is wired by the entry-point block.
+   */
+  collectActiveMemberList?: typeof defaultCollectActiveMemberList;
   /**
    * Optional so existing tests that omit it don't break. At runtime the real
    * `sendRunLogEmail` is used by default; it no-ops outside of production.
@@ -556,6 +567,87 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
     await runExclusiveBrowserTask(res, job);
   });
 
+  // ---------------------------------------------------------------------------
+  // /run/collect-active-member-list  +  /downloads/active-members*
+  // ---------------------------------------------------------------------------
+
+  /* The CSV produced here lives under `data/` (NOT `public/`) because it
+   * contains member PII. It's served by an explicit token-gated handler
+   * below; nothing about this feature is reachable through the static
+   * middleware. */
+  app.post('/run/collect-active-member-list', async (req: Request, res: Response) => {
+    if (!deps.collectActiveMemberList) {
+      res.status(404).json({
+        error: 'collectActiveMemberList task is not wired on this server.',
+      });
+      return;
+    }
+    const body = req.body as Record<string, unknown>;
+    const headless = parseHeadless(body);
+    if (!headless.ok) { res.status(400).json({ error: headless.error }); return; }
+
+    const collectTask = deps.collectActiveMemberList;
+    await runExclusiveBrowserTask(res, {
+      name: 'collectActiveMemberList',
+      headless: headless.value,
+      run: async (ctx) =>
+        collectTask({
+          page: ctx.page,
+          log: ctx.log,
+          abortSignal: ctx.abortSignal,
+          sleep: ctx.sleep,
+        }),
+      summarize: (r) =>
+        r.success
+          ? `wrote ${r.written} rows (skipped ${r.skipped}, scanned ${r.scanned}) to ${r.outputPath}`
+          : `failed — ${r.error ?? 'unknown error'}`,
+    });
+  });
+
+  /* The download link is fetched on demand by the UI rather than baked
+   * into the static HTML. This means the token never appears in
+   * `index.html` source, View Source caches, or screen-share recordings.
+   * Anyone with browser DevTools to this server can still observe it,
+   * but those people are admins by definition. */
+  app.get('/downloads/active-members-link', (_req: Request, res: Response) => {
+    const token = process.env.ACTIVE_MEMBER_LIST_TOKEN?.trim();
+    if (!token) {
+      res.status(404).json({
+        error: 'ACTIVE_MEMBER_LIST_TOKEN is not set on this server.',
+      });
+      return;
+    }
+    let exists = false;
+    let mtime: string | null = null;
+    try {
+      const stat = fs.statSync(activeMembersCsvPath());
+      exists = true;
+      mtime = stat.mtime.toISOString();
+    } catch {
+      /* File not yet generated. The UI uses `exists: false` to render
+       * "(not generated yet)" instead of a broken link. */
+    }
+    res.status(200).json({
+      url: `/downloads/active-members.csv?token=${encodeURIComponent(token)}`,
+      exists,
+      mtime,
+    });
+  });
+
+  app.get('/downloads/active-members.csv', (req: Request, res: Response) => {
+    const expected = process.env.ACTIVE_MEMBER_LIST_TOKEN?.trim();
+    if (!expected) { res.status(404).end(); return; }
+    const provided = typeof req.query.token === 'string' ? req.query.token : '';
+    if (!tokensMatch(expected, provided)) { res.status(403).end(); return; }
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="active-members.csv"');
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(activeMembersCsvPath(), (err) => {
+      if (err && !res.headersSent) res.status(404).end();
+    });
+  });
+
   // -----------------------------------------------------------------------
   // Stage 4d: agreements dashboard (read-only SQLite + optional IMAP meta)
   // -----------------------------------------------------------------------
@@ -732,6 +824,7 @@ if (isMainModule) {
     launchBrowser: defaultLaunchBrowser,
     removeSpaceMembers: defaultRemoveSpaceMembers,
     addSpaceMember: defaultAddSpaceMember,
+    collectActiveMemberList: defaultCollectActiveMemberList,
     agreementsStore,
     agreementsImapPollOnce:
       agreementsEnabled && agreementsStore

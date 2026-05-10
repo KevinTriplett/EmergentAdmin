@@ -594,6 +594,66 @@ sqlite3 /home/deploy/EmergentAdmin/data/ec-admin.db \
    GROUP BY space_name ORDER BY failed_count DESC;"
 ```
 
+## 5.5 Active member list export
+
+The **Members** tab in the admin UI runs a Puppeteer task that fetches the
+all-members listing **directly from MN's internal REST API**
+(`GET https://emergent-commons.mn.co/api/web/v1/spaces/4747401/members/all`,
+with `?include_email=true&page=N&per_page=100&sort=last_visit_at&sort_order=desc`).
+The puppeteer side visits the rendered admin page once at the top of the run
+solely to warm the session cookie, then issues page-side `fetch(url, {
+credentials: 'include' })` calls — the session cookie is reused, so no token
+plumbing is required.
+
+The task filters the response to members with at least 1 year of tenure who
+have been active in the past 90 days, hard-excludes the bot account
+(member id `39358139`, "Commons Keeper Admin"), stops paginating as soon as
+it crosses the 90-day cutoff (or hits a never-visited row, an empty page, a
+short page, or the `MAX_PAGES=1000` safety bound), and writes
+`data/active-members.csv` with columns `NAME, MEMBER ID, JOINED, LAST ACTIVE`.
+
+> **If MN ever restructures the API URL** (new path, new domain, new
+> versioning prefix), fix it in **one place**: the `API_URL_BASE` constant
+> at the top of `src/tasks/collectActiveMemberList.ts`. The space id
+> `4747401` is embedded in that constant; update both together.
+
+The CSV contains member PII (full names + ids), so the file lives outside the
+static-served `public/` tree and is reachable only through a token-gated download
+endpoint. To enable downloads:
+
+1. Generate a token (32 bytes of hex is plenty):
+
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   ```
+
+2. Add it to `/home/deploy/EmergentAdmin/.env` as `ACTIVE_MEMBER_LIST_TOKEN=…`.
+3. Restart the service: `sudo systemctl restart emergent-admin`.
+4. Open the admin UI's **Members** tab. The dashboard reads the token from a small
+   `/downloads/active-members-link` endpoint on demand (the token is **never**
+   embedded in the static HTML) and uses it to authenticate the **Download CSV**
+   click.
+
+Endpoints exposed by this feature:
+
+- `POST /run/collect-active-member-list` — runs the scrape through the same
+  exclusive browser scheduler as Add/Remove. Honors the global `headless` flag.
+- `GET /downloads/active-members-link` — returns
+  `{ url, exists, mtime }` when the token is set; HTTP 404 otherwise. Used by
+  the UI to populate the download link.
+- `GET /downloads/active-members.csv?token=…` — token-gated `sendFile`.
+  - 404 if `ACTIVE_MEMBER_LIST_TOKEN` is unset on the server.
+  - 403 if the supplied token doesn't constant-time-match the env var.
+  - 404 if the token matches but no CSV has been generated yet.
+  - 200 + `Content-Type: text/csv` otherwise.
+
+To rotate the token, change `ACTIVE_MEMBER_LIST_TOKEN` in `.env` and restart.
+Old links 403 immediately. The next click of **Download CSV** in the UI fetches
+the new tokenised URL automatically.
+
+The CSV is overwritten on every run; there is intentionally no rotation. If you
+need history, copy the file off-server before re-running.
+
 ## 6. Create systemd service
 
 systemd does **not** source the user's shell, so `nvm` (a shell function) is not on `PATH` by default. We start Node through a short `bash -lc` wrapper that sources nvm and reads `.nvmrc`. This way the service always tracks whatever version the repo pins — no unit-file edits needed when you bump Node.

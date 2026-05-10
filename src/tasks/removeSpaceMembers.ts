@@ -1,6 +1,7 @@
 import type { ElementHandle, Page } from 'puppeteer';
 import { loginIfNeeded, type LogFn } from '../auth.js';
 import { abortedRemovalMessage } from '../abortRemoval.js';
+import { domClick, waitForSelector } from '../utils/page.js';
 
 // === CSS SELECTORS — UPDATE THESE IF MN CHANGES ITS DOM ===
 const SEL_READY = 'body.pace-done #community-app';
@@ -131,13 +132,9 @@ async function readRowMeta(row: ElementHandle<Element>): Promise<RowMeta> {
   });
 }
 
-async function waitForSelector(page: Page, selector: string, timeoutMs: number): Promise<void> {
-  await page.waitForFunction(
-    (sel) => document.querySelector(sel) !== null,
-    { timeout: timeoutMs },
-    selector,
-  );
-}
+/* `waitForSelector` (presence) is imported from `../utils/page.js`. The
+ * absence variant below is task-local because no other task currently
+ * needs it. */
 
 async function waitForSelectorAbsent(page: Page, selector: string, timeoutMs: number): Promise<void> {
   await page.waitForFunction(
@@ -147,16 +144,14 @@ async function waitForSelectorAbsent(page: Page, selector: string, timeoutMs: nu
   );
 }
 
-/** DOM click on a selector. MN menu/modal controls do not respond to Puppeteer pointer clicks. */
-async function domClick(page: Page, selector: string, label: string): Promise<void> {
-  const found = await page.evaluate((sel) => {
-    const el = document.querySelector(sel) as HTMLElement | null;
-    if (!el) return false;
-    el.click();
-    return true;
-  }, selector);
-  if (!found) throw new Error(`${label}: selector not found (${selector})`);
-}
+/* `domClick` is now imported from `../utils/page.js`. The shared
+ * version waits for the selector (default 15s) before clicking, which
+ * is a redundant no-op for the four callsites here whose preceding
+ * step already postcondition-checked the same selector, and a
+ * meaningful robustness improvement in `confirmRemoval` (where the
+ * preceding step only confirms the modal *region*, not the confirm
+ * button itself). MN's animated modal mount can render the region
+ * a beat before the button is clickable; the wait absorbs that. */
 
 async function disposeHandle(handle: ElementHandle<Element> | null): Promise<void> {
   if (!handle) return;

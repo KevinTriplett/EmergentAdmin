@@ -606,9 +606,9 @@ credentials: 'include' })` calls — the session cookie is reused, so no token
 plumbing is required.
 
 The task filters the response to members with at least 1 year of tenure who
-have been active in the past 90 days, hard-excludes the bot account
+have been active in the past 30 days, hard-excludes the bot account
 (member id `39358139`, "Commons Keeper Admin"), stops paginating as soon as
-it crosses the 90-day cutoff (or hits a never-visited row, an empty page, a
+it crosses the 30-day cutoff (or hits a never-visited row, an empty page, a
 short page, or the `MAX_PAGES=1000` safety bound), and writes
 `data/active-members.csv` with columns `NAME, MEMBER ID, JOINED, LAST ACTIVE`.
 

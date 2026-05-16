@@ -43,8 +43,8 @@ const MEMBERS_URL =
  * `sort=last_visit_at&sort_order=desc` produces the same descending
  * "Last Active" order the admin UI uses; combined with the
  * break-on-inactive walk it lets us stop paginating as soon as we
- * cross the 90-day cutoff instead of pulling every page in the
- * network. */
+ * cross the ACTIVE_MAX_DAYS cutoff instead of pulling every page in
+ * the network. */
 const API_URL_BASE =
   'https://emergent-commons.mn.co/api/web/v1/spaces/4747401/members/all';
 
@@ -53,7 +53,12 @@ const WAIT_READY_MS = 60_000;
 
 // === FILTER WINDOWS ===
 const ONE_DAY_MS = 86_400_000;
-const ACTIVE_MIN_DAYS = 30 * ONE_DAY_MS;
+/* Maximum age (in ms) of a member's last network visit for them to
+ * still count as "active". A row whose `lastActive` is older than
+ * `now - ACTIVE_MAX_DAYS` triggers a break-and-discard. Named MAX
+ * because it bounds the *age* of the last visit, not the number of
+ * days active. */
+const ACTIVE_MAX_DAYS = 30 * ONE_DAY_MS;
 const JOIN_MIN_DAYS = 365 * ONE_DAY_MS;
 
 // === PAGINATION ===
@@ -104,7 +109,7 @@ const msg = {
   excludedSkip: (id: number) =>
     `Skipping member id ${id}: excluded (admin / bot account).`,
   inactiveBreak: (label: string) =>
-    `Stopping at ${label}: last active > 90 days ago. Discarding this row and stopping (rest of list is sorted to be even less active).`,
+    `Stopping at ${label}: last active > ${ACTIVE_MAX_DAYS / ONE_DAY_MS} days ago. Discarding this row and stopping (rest of list is sorted to be even less active).`,
   neverVisitedBreak: (label: string) =>
     `Stopping at ${label}: never visited (network_last_visit_at = null). Discarding this row and stopping.`,
   sortViolation: (page: number) =>
@@ -180,7 +185,7 @@ type Member = {
  * by the cutoff math so "exactly N days ago" comparisons work at
  * day-level resolution rather than ms-level — the cutoffs are
  * specified in calendar-day language, so a row whose Last Active is
- * *the same date* as the 90-day cutoff is "still active" by intent.
+ * *the same date* as the active cutoff is "still active" by intent.
  */
 function utcDayStart(d: Date): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
@@ -296,11 +301,11 @@ function classifyMember(member: Member, now: Date): Decision {
   /* Anchor both sides at UTC day boundaries so a parsed date that's
    * exactly N calendar days ago compares as N days ago, not "N days
    * + (now's time-of-day)". Without this, a row whose Last Active is
-   * the literal calendar date "90 days before today" gets classified
-   * as 90 days + a few hours ago and is wrongly broken on. */
+   * the literal calendar date at the cutoff gets classified as
+   * cutoff + a few hours ago and is wrongly broken on. */
   const todayUtc = utcDayStart(now);
   const oneYearAgo = new Date(todayUtc.getTime() - JOIN_MIN_DAYS);
-  const ninetyDaysAgo = new Date(todayUtc.getTime() - ACTIVE_MIN_DAYS);
+  const activeCutoff = new Date(todayUtc.getTime() - ACTIVE_MAX_DAYS);
   const joinedDay = utcDayStart(member.joined);
 
   /* `joinedDay > oneYearAgo` ⇒ joined LESS THAN 1 year ago ⇒ recent
@@ -319,10 +324,11 @@ function classifyMember(member: Member, now: Date): Decision {
     return { kind: 'break', member, reason: 'never-visited' };
   }
 
-  /* `lastActiveDay < ninetyDaysAgo` ⇒ inactive > 90 days ⇒ break.
-   * Inclusive on the recent side: exactly 90 days old still passes. */
+  /* `lastActiveDay < activeCutoff` ⇒ inactive past ACTIVE_MAX_DAYS ⇒
+   * break. Inclusive on the recent side: a row whose lastActive is
+   * exactly ACTIVE_MAX_DAYS old still passes. */
   const lastActiveDay = utcDayStart(member.lastActive);
-  if (lastActiveDay.getTime() < ninetyDaysAgo.getTime()) {
+  if (lastActiveDay.getTime() < activeCutoff.getTime()) {
     return { kind: 'break', member, reason: 'inactive' };
   }
 

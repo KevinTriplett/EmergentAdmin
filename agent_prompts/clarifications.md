@@ -203,7 +203,7 @@ Process:
         1. if `user.id` is in the EXCLUDED_MEMBER_IDS set (currently `[39358139]` — the Commons Keeper Admin bot account), skip and continue (counts toward `skipped`)
         1. if `user.membership.created_at` < 1 year ago, skip and continue
         1. if `user.network_last_visit_at === null`, break and discard (never-visited)
-        1. if `user.network_last_visit_at` < 90 days ago is FALSE (i.e. more than 90 days), break and discard
+        1. if `user.network_last_visit_at` < 30 days ago is FALSE (i.e. more than 30 days), break and discard
         1. else keep
     1. stop paginating when the page is empty, the page returned `< per_page` rows, a break decision fired, or `MAX_PAGES=1000` was reached
 1. after each page, log a one-time WARNING if the rows are not sorted descending by `last_visit_at` (insurance against MN silently changing the sort honour)

@@ -360,7 +360,7 @@ describe('collectActiveMemberList', () => {
     const members = [
       makeMember({ id: 111, name: 'Tenured Alice', joinedDaysAgo: 800, lastActiveDaysAgo: 5 }),
       makeMember({ id: 222, name: 'New Bob', joinedDaysAgo: 180, lastActiveDaysAgo: 2 }),
-      makeMember({ id: 333, name: 'Tenured Carol', joinedDaysAgo: 800, lastActiveDaysAgo: 45 }),
+      makeMember({ id: 333, name: 'Tenured Carol', joinedDaysAgo: 800, lastActiveDaysAgo: 25 }),
     ];
     const page = buildPageWithFetchResponses([
       { ok: true, json: members },
@@ -386,14 +386,14 @@ describe('collectActiveMemberList', () => {
     expect(csv).not.toContain('New Bob');
   });
 
-  it('breaks at first row whose lastActive > 90 days ago and discards it', async () => {
+  it('breaks at first row whose lastActive > 30 days ago and discards it', async () => {
     /* Stale Bob is the break trigger. Per the spec, scanned counts only
      * rows that survived classification (kept + skipped); the breaking
      * row itself is NOT counted. So scanned = 1 (just Active Alice). */
     const members = [
-      makeMember({ id: 111, name: 'Active Alice', joinedDaysAgo: 800, lastActiveDaysAgo: 60 }),
-      makeMember({ id: 222, name: 'Stale Bob', joinedDaysAgo: 800, lastActiveDaysAgo: 91 }),
-      makeMember({ id: 333, name: 'Should Not See', joinedDaysAgo: 800, lastActiveDaysAgo: 95 }),
+      makeMember({ id: 111, name: 'Active Alice', joinedDaysAgo: 800, lastActiveDaysAgo: 20 }),
+      makeMember({ id: 222, name: 'Stale Bob', joinedDaysAgo: 800, lastActiveDaysAgo: 31 }),
+      makeMember({ id: 333, name: 'Should Not See', joinedDaysAgo: 800, lastActiveDaysAgo: 35 }),
     ];
     const page = buildPageWithFetchResponses([
       { ok: true, json: members },
@@ -423,9 +423,9 @@ describe('collectActiveMemberList', () => {
   // Boundary precision (per system_prompt §3.4)
   // -------------------------------------------------------------------------
 
-  it('keeps a row whose lastActive is exactly 90 days old (inclusive cutoff)', async () => {
+  it('keeps a row whose lastActive is exactly 30 days old (inclusive cutoff)', async () => {
     const members = [
-      makeMember({ id: 111, name: 'Edge Alice', joinedDaysAgo: 800, lastActiveDaysAgo: 90 }),
+      makeMember({ id: 111, name: 'Edge Alice', joinedDaysAgo: 800, lastActiveDaysAgo: 30 }),
     ];
     const page = buildPageWithFetchResponses([
       { ok: true, json: members },

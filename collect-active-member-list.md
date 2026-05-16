@@ -10,7 +10,7 @@ Source spec: `agent_prompts/clarifications.md` § "collectActiveMemberList".
 > cookie comes from a one-time visit to the rendered admin page at
 > the top of the run; no token plumbing is required. Pagination is
 > 1-indexed; termination is `break decision OR empty page OR
-> rows<per_page OR MAX_PAGES=1000`. The 90-day / 1-year filter logic
+> rows<per_page OR MAX_PAGES=1000`. The 30-day / 1-year filter logic
 > and `data/active-members.csv` output (header `NAME,MEMBER ID,JOINED,
 > LAST ACTIVE`, dates `Apr 19, 2025`-style, RFC-4180 quoted) are
 > unchanged. If MN ever restructures the API URL the constant lives
@@ -35,7 +35,7 @@ Per-row filter logic (final, see clarifications.md §collectActiveMemberList lin
 
 - `memberJoinDate < 1 year ago` (i.e. the member joined less than a year before "today") →
   **skip this row, continue** the walk. The intent is "members with ≥ 1 year of tenure".
-- `memberLastActiveDate > 90 days ago` → **break out of the loop and discard this row**.
+- `memberLastActiveDate > 30 days ago` → **break out of the loop and discard this row**.
   Because the list is sorted by Last Active DESC, every row after the breaking row is
   guaranteed to also fail the cutoff, so stopping is correct.
 
@@ -104,7 +104,7 @@ export type CollectActiveMemberListResult = {
 ```
 
 `skipped` and `scanned` are populated for the run-log email and admin debugging — the
-operator wants to know "did the walk stop early because of the 90-day cutoff, or because
+operator wants to know "did the walk stop early because of the 30-day cutoff, or because
 it really hit the bottom of the list?", and the difference between `scanned` and
 `written + skipped` answers that.
 
@@ -169,9 +169,9 @@ const SEL_SORTED_BY_LAST_ACTIVE = '#menu-list-item-last_visit_at_desc';
    - **Filter logic** (final, per clarifications.md 199–200):
      - If `memberJoinDate >= now - 1 year` → **skip this row, continue** (joined too
        recently; doesn't qualify as "tenured active member"). Increment `skipped`.
-     - Else if `memberLastActiveDate < now - 90 days` → **break out of the loop and
+     - Else if `memberLastActiveDate < now - 30 days` → **break out of the loop and
        discard this row** (because the list is sorted by Last Active DESC, every row
-       after this is also past the 90-day cutoff). Increment `scanned` for the
+       after this is also past the 30-day cutoff). Increment `scanned` for the
        breaking row but do not push it.
      - Else push `{ name, memberId, joined, lastActive }` into the result buffer.
 8. **Write CSV** — `fs.writeFile(outputPath, header + rows.map(toCsvRow).join('\n'))`.
@@ -212,8 +212,8 @@ Cutoff comparisons:
 - "1 year ago" = `now` minus 365 days at exact-ms resolution. Inclusive on the
   recent side: a row whose `joined` is *exactly* 1 year old is kept (qualifies for
   "tenured").
-- "90 days ago" = `now` minus 90 days. Inclusive on the recent side: a row whose
-  `lastActive` is *exactly* 90 days old is kept (still active).
+- "30 days ago" = `now` minus 30 days. Inclusive on the recent side: a row whose
+  `lastActive` is *exactly* 30 days old is kept (still active).
 
 > If the live MN page later starts emitting relative strings (e.g. "yesterday"), the
 > parser will mark them unparseable and the run will halt with a loud log line — the
@@ -403,8 +403,8 @@ helpers, and the new endpoints.
 11. **`parseAbsoluteDate`** — `"Apr 19, 2026"`, `"2026-04-19"`, `"April 19, 2026"`,
     whitespace, an obviously-future date (sanity guard), an empty string, and a
     nonsense input.
-12. **filter logic** — cutoff edge cases (exactly 90 days old still passes, exactly
-    91 days old breaks; exactly 1 year tenure still passes, 364 days skips).
+12. **filter logic** — cutoff edge cases (exactly 30 days old still passes, exactly
+    31 days old breaks; exactly 1 year tenure still passes, 364 days skips).
 
 ### Server endpoints
 
@@ -453,7 +453,7 @@ Run with `npm test`; vitest is already configured.
   bound on row count or wall-clock time, surfacing partial results with a clear
   warning; (b) honour `abortSignal` during scroll, not just during the row walk; (c)
   the sort-by-last-active means we can stop scrolling once the last loaded row's
-  `lastActive` is past 90 days — early termination short-circuits long tails. We'll
+  `lastActive` is past 30 days — early termination short-circuits long tails. We'll
   add the early-termination optimisation in step 3 of the implementation order.
 - **Date parser failure modes** — MN locales other than the bot's could shift the
   date format. The parser fails loudly rather than emitting wrong dates; the operator
@@ -473,7 +473,7 @@ Run with `npm test`; vitest is already configured.
 
 - **Q1 — Filter semantics.** Resolved per clarifications.md 199–200 (the file's
   current text, not the earlier draft): `joined < 1 year ago` → skip-but-continue;
-  `lastActive > 90 days ago` → break-and-stop. Net intent: "active members with ≥ 1
+  `lastActive > 30 days ago` → break-and-stop. Net intent: "active members with ≥ 1
   year of tenure".
 - **Q2 — Output destination.** **Override:** the CSV lands in `data/`, not `public/`,
   because the file holds PII and the `data/` directory is already gitignored and

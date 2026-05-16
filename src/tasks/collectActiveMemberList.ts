@@ -53,8 +53,8 @@ const WAIT_READY_MS = 60_000;
 
 // === FILTER WINDOWS ===
 const ONE_DAY_MS = 86_400_000;
-const NINETY_DAYS_MS = 90 * ONE_DAY_MS;
-const ONE_YEAR_MS = 365 * ONE_DAY_MS;
+const ACTIVE_MIN_DAYS = 30 * ONE_DAY_MS;
+const JOIN_MIN_DAYS = 365 * ONE_DAY_MS;
 
 // === PAGINATION ===
 /* `per_page=100` was probed against the live API and is honoured. We
@@ -299,8 +299,8 @@ function classifyMember(member: Member, now: Date): Decision {
    * the literal calendar date "90 days before today" gets classified
    * as 90 days + a few hours ago and is wrongly broken on. */
   const todayUtc = utcDayStart(now);
-  const oneYearAgo = new Date(todayUtc.getTime() - ONE_YEAR_MS);
-  const ninetyDaysAgo = new Date(todayUtc.getTime() - NINETY_DAYS_MS);
+  const oneYearAgo = new Date(todayUtc.getTime() - JOIN_MIN_DAYS);
+  const ninetyDaysAgo = new Date(todayUtc.getTime() - ACTIVE_MIN_DAYS);
   const joinedDay = utcDayStart(member.joined);
 
   /* `joinedDay > oneYearAgo` ⇒ joined LESS THAN 1 year ago ⇒ recent

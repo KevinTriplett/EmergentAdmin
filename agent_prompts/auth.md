@@ -14,10 +14,16 @@ async function login(page, log)
 // === CSS SELECTORS — UPDATE THESE IF MN CHANGES ITS DOM ===
 const SEL_READY = 'body.pace-done #community-app';
 const SEL_SIGN_IN = 'body.auth-sign_in';
+const SEL_LANDING = 'body.communities-landing';
 const SEL_GDPR_CONSENT = '#c-p-bn';
 const SEL_SIGNED_IN = 'body.communities-app';
+const SEL_PRIVACY_AGREEMENT = 'body.onboarding-privacy_agreement';
+const SEL_PRIVACY_FORM_AGREE = 'label.privacy-form-agree span.unchecked-icon';
+const SEL_PRIVACY_FORM_EMAILS = 'label.privacy-form-activity-emails-agree span.unchecked-icon';
+const SEL_PRIVACY_FORM_SUBMIT = ".privacy-agreement-form button[type='button-submit']";
 
 // === TEXT LABELS — UPDATE THESE IF MN CHANGES ITS UI TEXT ===
+const TXT_LANDING_SIGN_IN = 'Sign In';
 const TXT_EMAIL = 'Email';
 const TXT_NEXT = 'Next';
 const TXT_SIGN_IN_WITH_PASSWORD = 'Sign In with Password';
@@ -48,9 +54,39 @@ export credentials.
 7. Find the input element whose associated label or placeholder text
    is `TXT_PASSWORD`. Fill it with `process.env.MN_PASSWORD`.
 8. Click the element whose visible text is `TXT_NEXT`.
-9. Wait for `SEL_SIGNED_IN` to appear (max 15 seconds). If it does
-   not appear, throw:
+9. Wait (max 15 seconds) for either `SEL_SIGNED_IN` **or**
+   `SEL_PRIVACY_AGREEMENT` to appear. If neither appears, throw:
    `"Login failed — check credentials or MN_COMMUNITY_URL in .env"`
+10. Run the privacy-agreement handler (see below). It is a no-op when
+    `SEL_PRIVACY_AGREEMENT` is absent.
+11. Wait for `SEL_SIGNED_IN` (max 30 seconds).
+
+## Privacy Agreement Handler
+
+Mighty Networks may insert
+`https://emergent-commons.mn.co/onboarding/privacy_agreement` either
+immediately after a successful login or — for an already-authenticated
+session — as the first page returned when navigating to any admin URL.
+The handler MUST be invoked in both places:
+
+- Inside `login()` after the password submit (step 10 above).
+- Inside `loginIfNeeded()` right after the app shell wait, *before*
+  dispatching to the landing / sign-in / signed-in branches.
+
+Algorithm (run only when `SEL_PRIVACY_AGREEMENT` is present):
+
+1. If `SEL_PRIVACY_FORM_AGREE` is present, click it and wait for that
+   selector to disappear (the icon swaps from `unchecked-icon` to
+   `checked-icon`). If absent, the checkbox is already satisfied — skip.
+2. Repeat step 1 for `SEL_PRIVACY_FORM_EMAILS`.
+3. Click `SEL_PRIVACY_FORM_SUBMIT`. If the click destroys the execution
+   context, treat that as the navigation success signal — do not throw.
+4. If `SEL_PRIVACY_FORM_SUBMIT` is not found while the modal is present,
+   throw `"Privacy agreement submit button not found."`.
+
+Inside `loginIfNeeded()`, if the handler reports that the form was
+submitted, re-run the app-shell wait so the subsequent body-class checks
+see the new (`communities-app`) shell.
 
 ## Logging
 
@@ -62,6 +98,9 @@ Call `log()` at each numbered step with a status string:
 - `"Selecting password sign-in..."`
 - `"Entering password..."`
 - `"Submitting login..."`
+- `"Privacy agreement page detected — completing form..."` (only when present)
+- `"Privacy agreement: checking <description>..."` / `"... already checked — skipping."`
+- `"Privacy agreement: submitting..."` then `"Privacy agreement: submitted."`
 - `"Login confirmed."` or throw on failure
 
 ## Conditional Login Helper

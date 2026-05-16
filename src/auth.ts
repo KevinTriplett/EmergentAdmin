@@ -7,6 +7,10 @@ const SEL_SIGN_IN = 'body.auth-sign_in';
 const SEL_LANDING = 'body.communities-landing';
 const SEL_GDPR_CONSENT = '#c-p-bn';
 const SEL_SIGNED_IN = 'body.communities-app';
+const SEL_PRIVACY_AGREEMENT = 'body.onboarding-privacy_agreement';
+const SEL_PRIVACY_FORM_AGREE = 'label.privacy-form-agree span.unchecked-icon';
+const SEL_PRIVACY_FORM_EMAILS = 'label.privacy-form-activity-emails-agree span.unchecked-icon';
+const SEL_PRIVACY_FORM_SUBMIT = ".privacy-agreement-form button[type='button-submit']"
 
 // === TEXT LABELS — UPDATE THESE IF MN CHANGES ITS UI TEXT ===
 const TXT_LANDING_SIGN_IN = 'Sign In';
@@ -171,6 +175,73 @@ async function handleGdprConsentIfPresent(page: Page, log: LogFn): Promise<void>
   }
 }
 
+/**
+ * Mighty Networks decorates each privacy-form checkbox with a sibling
+ * `span.unchecked-icon` that swaps to `span.checked-icon` once the hidden
+ * input is checked. Querying `span.unchecked-icon` therefore doubles as both
+ * the click target *and* the post-click assertion (it disappears once
+ * checked). If the selector is already absent the checkbox is satisfied —
+ * we must not treat that as a failure.
+ */
+async function clickPrivacyCheckboxIfPresent(
+  page: Page,
+  selector: string,
+  description: string,
+  log: LogFn,
+): Promise<void> {
+  const handle = await page.$(selector);
+  if (!handle) {
+    await log(`Privacy agreement: ${description} already checked — skipping.`);
+    return;
+  }
+  try {
+    await log(`Privacy agreement: checking ${description}...`);
+    await handle.click();
+  } finally {
+    if (typeof handle.dispose === 'function') {
+      await handle.dispose();
+    }
+  }
+  /* Postcondition: the unchecked-icon must be gone (class flipped to
+   * checked-icon). `hidden: true` covers both "not present" and "not
+   * visible", which is the right signal regardless of how MN re-renders. */
+  await page.waitForSelector(selector, { hidden: true, timeout: 10_000 });
+}
+
+async function handlePrivacyAgreementIfPresent(page: Page, log: LogFn): Promise<boolean> {
+  const modal = await page.$(SEL_PRIVACY_AGREEMENT);
+  if (!modal) return false;
+  if (typeof modal.dispose === 'function') {
+    await modal.dispose();
+  }
+  await log('Privacy agreement page detected — completing form...');
+
+  await clickPrivacyCheckboxIfPresent(page, SEL_PRIVACY_FORM_AGREE, 'I agree', log);
+  await clickPrivacyCheckboxIfPresent(page, SEL_PRIVACY_FORM_EMAILS, 'activity emails', log);
+
+  const submit = await page.$(SEL_PRIVACY_FORM_SUBMIT);
+  if (!submit) {
+    throw new Error('Privacy agreement submit button not found.');
+  }
+  try {
+    await log('Privacy agreement: submitting...');
+    try {
+      await submit.click();
+    } catch (err) {
+      /* The submit triggers a navigation away from /onboarding/privacy_agreement;
+       * Puppeteer commonly surfaces this as "Execution context was destroyed".
+       * That's the success signal, not a failure. */
+      if (!isExecutionContextDestroyedError(err)) throw err;
+    }
+  } finally {
+    if (typeof submit.dispose === 'function') {
+      await submit.dispose();
+    }
+  }
+  await log('Privacy agreement: submitted.');
+  return true;
+}
+
 async function waitForChallengeClearIfPresent(page: Page, log: LogFn): Promise<void> {
   const title = await page.title().catch(() => '');
   if (!title.includes('Just a moment')) {
@@ -243,7 +314,19 @@ export async function login(page: Page, log: LogFn): Promise<{ success: true }> 
     await log('Submitting login...');
     await clickFirstWithExactText(page, TXT_NEXT);
 
-    await page.waitForSelector(SEL_SIGNED_IN, { timeout: 15_000 });
+    /* The server may insert /onboarding/privacy_agreement between the
+     * password submit and the signed-in shell. Wait for whichever lands
+     * first, complete the form if needed, then wait for the signed-in
+     * shell. */
+    await page.waitForFunction(
+      ({ signedIn, privacy }) =>
+        Boolean(document.querySelector(signedIn)) ||
+        Boolean(document.querySelector(privacy)),
+      { timeout: 15_000 },
+      { signedIn: SEL_SIGNED_IN, privacy: SEL_PRIVACY_AGREEMENT },
+    );
+    await handlePrivacyAgreementIfPresent(page, log);
+    await page.waitForSelector(SEL_SIGNED_IN, { timeout: 30_000 });
     await log('Login confirmed.');
     await rememberProfileAccount(email, log);
     return { success: true };
@@ -257,27 +340,25 @@ export async function login(page: Page, log: LogFn): Promise<{ success: true }> 
   }
 }
 
-export async function loginIfNeeded(
-  page: Page,
-  log: LogFn,
-  deps: LoginDeps = {},
-): Promise<void> {
-  await log('Waiting for app shell...');
-  await waitForChallengeClearIfPresent(page, log);
-  const shellSelectors = { signIn: SEL_SIGN_IN, signedIn: SEL_SIGNED_IN, landing: SEL_LANDING };
-  let shellReady = false;
+async function waitForAuthShell(page: Page, log: LogFn): Promise<void> {
+  const shellSelectors = {
+    signIn: SEL_SIGN_IN,
+    signedIn: SEL_SIGNED_IN,
+    landing: SEL_LANDING,
+    privacy: SEL_PRIVACY_AGREEMENT,
+  };
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       await page.waitForFunction(
-        ({ signIn, signedIn, landing }) =>
+        ({ signIn, signedIn, landing, privacy }) =>
           Boolean(document.querySelector(signIn)) ||
           Boolean(document.querySelector(signedIn)) ||
-          Boolean(document.querySelector(landing)),
+          Boolean(document.querySelector(landing)) ||
+          Boolean(document.querySelector(privacy)),
         { timeout: AUTH_SHELL_WAIT_MS },
         shellSelectors,
       );
-      shellReady = true;
-      break;
+      return;
     } catch (err) {
       if (isDetachedFrameError(err) || isExecutionContextDestroyedError(err)) {
         await log(`Auth shell wait interrupted by navigation/frame swap (attempt ${attempt}/3).`);
@@ -291,7 +372,7 @@ export async function loginIfNeeded(
 
       try {
         const shellState = await page.evaluate(
-          ({ ready, signIn, signedIn, landing, gdpr }) => ({
+          ({ ready, signIn, signedIn, landing, gdpr, privacy }) => ({
             url: location.href,
             title: document.title,
             bodyClass: document.body?.className ?? '',
@@ -300,6 +381,7 @@ export async function loginIfNeeded(
             signedInFound: Boolean(document.querySelector(signedIn)),
             landingFound: Boolean(document.querySelector(landing)),
             gdprFound: Boolean(document.querySelector(gdpr)),
+            privacyFound: Boolean(document.querySelector(privacy)),
           }),
           {
             ready: SEL_READY,
@@ -307,13 +389,14 @@ export async function loginIfNeeded(
             signedIn: SEL_SIGNED_IN,
             landing: SEL_LANDING,
             gdpr: SEL_GDPR_CONSENT,
+            privacy: SEL_PRIVACY_AGREEMENT,
           },
         );
         await log(
           `Auth shell timeout debug: url=${shellState.url} title="${shellState.title}" bodyClass="${shellState.bodyClass}"`,
         );
         await log(
-          `Auth shell timeout debug: ready=${shellState.readyFound} signIn=${shellState.signInFound} signedIn=${shellState.signedInFound} landing=${shellState.landingFound} gdpr=${shellState.gdprFound}`,
+          `Auth shell timeout debug: ready=${shellState.readyFound} signIn=${shellState.signInFound} signedIn=${shellState.signedInFound} landing=${shellState.landingFound} gdpr=${shellState.gdprFound} privacy=${shellState.privacyFound}`,
         );
       } catch (debugErr) {
         const debugMsg = debugErr instanceof Error ? debugErr.message : String(debugErr);
@@ -325,8 +408,26 @@ export async function loginIfNeeded(
       throw new Error(`Timed out waiting for auth shell. ${message}`, { cause: err });
     }
   }
-  if (!shellReady) {
-    throw new Error('Timed out waiting for auth shell after retries.');
+  throw new Error('Timed out waiting for auth shell after retries.');
+}
+
+export async function loginIfNeeded(
+  page: Page,
+  log: LogFn,
+  deps: LoginDeps = {},
+): Promise<void> {
+  await log('Waiting for app shell...');
+  await waitForChallengeClearIfPresent(page, log);
+  await waitForAuthShell(page, log);
+
+  /* If the server redirected an already-authenticated session to
+   * /onboarding/privacy_agreement, we must clear the form *before* the
+   * downstream landing/signIn/signedIn dispatch — otherwise none of those
+   * shells will match and we fall through to "Unknown authentication
+   * state". After the form submits the body class flips to
+   * communities-app, so re-run the shell wait. */
+  if (await handlePrivacyAgreementIfPresent(page, log)) {
+    await waitForAuthShell(page, log);
   }
 
   const landing = await page.$(SEL_LANDING);

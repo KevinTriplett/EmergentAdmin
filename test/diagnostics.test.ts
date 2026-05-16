@@ -18,11 +18,16 @@ type FakePage = {
   screenshot: (opts: { path: string; fullPage?: boolean }) => Promise<void>;
 };
 
-function makeHappyPage(opts: { url?: string; title?: string; bodyClass?: string } = {}): FakePage {
+function makeHappyPage(
+  opts: { url?: string; title?: string; bodyClass?: string; inputCount?: number } = {},
+): FakePage {
   return {
     url: () => opts.url ?? 'https://example.com/some/page',
     title: async () => opts.title ?? 'Example Page',
-    evaluate: async () => opts.bodyClass ?? 'communities-app pace-done',
+    evaluate: async () => ({
+      bodyClass: opts.bodyClass ?? 'communities-app pace-done',
+      inputCount: opts.inputCount ?? 0,
+    }),
     screenshot: async ({ path: p }) => {
       const tinyPng = Buffer.from(
         '89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4890000000A49444154789C6300010000000500010D0A2DB40000000049454E44AE426082',
@@ -57,6 +62,7 @@ describe('dumpFailureDiagnostics', () => {
       url: 'https://emergent-commons.mn.co/spaces/5285007/admin/members/all',
       title: 'Just a moment...',
       bodyClass: 'cf-challenge',
+      inputCount: 0,
     });
     const logs: string[] = [];
 
@@ -83,6 +89,7 @@ describe('dumpFailureDiagnostics', () => {
     expect(meta.page.url).toBe('https://emergent-commons.mn.co/spaces/5285007/admin/members/all');
     expect(meta.page.title).toBe('Just a moment...');
     expect(meta.page.bodyClass).toBe('cf-challenge');
+    expect(meta.page.inputCount).toBe(0);
     expect(meta.error.message).toBe('Navigation timeout of 30000 ms exceeded');
     expect(meta.screenshot).toBe(result.pngPath);
 
@@ -106,6 +113,52 @@ describe('dumpFailureDiagnostics', () => {
     expect(base).toMatch(/^\d{8}T\d{6}Z-add-space-member-failed-99-Some-Space\.png$/);
   });
 
+  it('captures document.querySelectorAll("input").length so a "form not mounted" race is visible in the JSON', async () => {
+    /* Reproduces the diag scenario from 20260516T163212Z: body class
+     * says we're on /sign_in but the email input never rendered. With
+     * inputCount captured, an operator can tell at a glance that the
+     * page was mid-load (inputCount === 0 while bodyClass='auth-sign_in')
+     * vs. a markup change (inputCount > 0 but selectors miss). */
+    const page = makeHappyPage({
+      url: 'https://emergent-commons.mn.co/sign_in',
+      title: 'Emergent Commons',
+      bodyClass: 'onboarding-layout auth-sign_in pace-running',
+      inputCount: 0,
+    });
+
+    const result = await dumpFailureDiagnostics(
+      page as never,
+      {
+        reason: 'collect-active-member-list-failed',
+        error: new Error('email input not found'),
+      },
+      () => {},
+    );
+
+    const meta = JSON.parse(await fs.readFile(result.jsonPath!, 'utf8'));
+    expect(meta.page.inputCount).toBe(0);
+    expect(meta.page.bodyClass).toBe('onboarding-layout auth-sign_in pace-running');
+  });
+
+  it('captures a non-zero inputCount when the form did mount', async () => {
+    const page = makeHappyPage({
+      bodyClass: 'auth-sign_in pace-done',
+      inputCount: 2,
+    });
+
+    const result = await dumpFailureDiagnostics(
+      page as never,
+      {
+        reason: 'add-space-member-failed',
+        error: new Error('some other failure after the form was up'),
+      },
+      () => {},
+    );
+
+    const meta = JSON.parse(await fs.readFile(result.jsonPath!, 'utf8'));
+    expect(meta.page.inputCount).toBe(2);
+  });
+
   it('still writes a JSON file when no page is provided', async () => {
     const result = await dumpFailureDiagnostics(
       null,
@@ -121,7 +174,7 @@ describe('dumpFailureDiagnostics', () => {
     expect(result.pngPath).toBeNull();
     expect(result.jsonPath).not.toBeNull();
     const meta = JSON.parse(await fs.readFile(result.jsonPath!, 'utf8'));
-    expect(meta.page).toEqual({ url: null, title: null, bodyClass: null });
+    expect(meta.page).toEqual({ url: null, title: null, bodyClass: null, inputCount: null });
     expect(meta.error.message).toBe('string-error');
     expect(meta.screenshot).toBeNull();
   });
@@ -239,6 +292,7 @@ describe('dumpFailureDiagnostics', () => {
     expect(meta.page.url).toBe('https://example.com/known');
     expect(meta.page.title).toBeNull();
     expect(meta.page.bodyClass).toBeNull();
+    expect(meta.page.inputCount).toBeNull();
   });
 
   it('never throws when the dump dir is unwritable', async () => {

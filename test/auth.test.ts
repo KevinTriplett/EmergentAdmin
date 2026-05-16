@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Page } from 'puppeteer';
-import { loginIfNeeded } from '../src/auth.js';
+import { login, loginIfNeeded } from '../src/auth.js';
 
 describe('loginIfNeeded', () => {
   const log = vi.fn<(m: string) => Promise<void>>().mockResolvedValue(undefined);
@@ -188,5 +188,102 @@ describe('loginIfNeeded', () => {
     } as unknown as Page;
 
     await expect(loginIfNeeded(page, log)).rejects.toThrow(/privacy agreement submit/i);
+  });
+});
+
+describe('login', () => {
+  const log = vi.fn<(m: string) => Promise<void>>().mockResolvedValue(undefined);
+  let savedEmail: string | undefined;
+  let savedPassword: string | undefined;
+
+  beforeEach(() => {
+    log.mockClear();
+    savedEmail = process.env.MN_EMAIL;
+    savedPassword = process.env.MN_PASSWORD;
+    process.env.MN_EMAIL = 'test@example.com';
+    process.env.MN_PASSWORD = 'hunter2';
+  });
+
+  afterEach(() => {
+    if (savedEmail === undefined) delete process.env.MN_EMAIL;
+    else process.env.MN_EMAIL = savedEmail;
+    if (savedPassword === undefined) delete process.env.MN_PASSWORD;
+    else process.env.MN_PASSWORD = savedPassword;
+  });
+
+  /* The deploy-machine failure 20260516T163212Z showed body.auth-sign_in
+   * matching SEL_SIGN_IN while pace.js was still running and the email
+   * input had not yet rendered. SEL_SIGN_IN is a *routing* signal —
+   * not a *mounted-form* signal. login() must wait for the actual
+   * email/password inputs to mount before calling fillEmail/fillPassword,
+   * otherwise the one-shot page.evaluate inside those helpers throws
+   * "email input not found"/"password input not found" and the run
+   * fails three steps before reaching the privacy agreement handler. */
+
+  type EvaluateArgs = readonly unknown[];
+
+  function makeLoginPage(calls: string[]): Page {
+    return {
+      goto: vi.fn().mockResolvedValue(undefined),
+      waitForSelector: vi.fn().mockResolvedValue({}),
+      waitForFunction: vi.fn(async (_fn: unknown, _opts: unknown, arg: unknown) => {
+        if (arg === 'Email') calls.push('waitInput:Email');
+        else if (arg === 'Password') calls.push('waitInput:Password');
+        else if (arg === 'Sign In with Password') calls.push('waitLabel:SignInWithPassword');
+        else if (arg && typeof arg === 'object' && 'signedIn' in (arg as object)) {
+          calls.push('waitShell:signedInOrPrivacy');
+        } else {
+          calls.push('waitFn:other');
+        }
+        return undefined;
+      }),
+      evaluate: vi.fn(async (_fn: unknown, ...args: EvaluateArgs) => {
+        const tag = args[0];
+        if (tag === 'Email') {
+          calls.push('fillEmail');
+          return undefined;
+        }
+        if (tag === 'Password') {
+          calls.push('fillPassword');
+          return undefined;
+        }
+        if (tag === 'Next') {
+          calls.push('clickNext');
+          return true;
+        }
+        if (tag === 'Sign In with Password') {
+          calls.push('clickSignInWithPassword');
+          return true;
+        }
+        calls.push('evaluate:other');
+        return undefined;
+      }),
+      $: vi.fn().mockResolvedValue(null),
+      title: vi.fn().mockResolvedValue(''),
+    } as unknown as Page;
+  }
+
+  it('waits for the email input to mount before calling fillEmail', async () => {
+    const calls: string[] = [];
+    const page = makeLoginPage(calls);
+
+    await login(page, log);
+
+    const waitIdx = calls.indexOf('waitInput:Email');
+    const fillIdx = calls.indexOf('fillEmail');
+    expect(waitIdx).toBeGreaterThanOrEqual(0);
+    expect(fillIdx).toBeGreaterThan(waitIdx);
+  });
+
+  it('waits for the password input to mount before calling fillPassword', async () => {
+    const calls: string[] = [];
+    const page = makeLoginPage(calls);
+
+    await login(page, log);
+
+    const waitIdx = calls.indexOf('waitInput:Password');
+    const fillIdx = calls.indexOf('fillPassword');
+    expect(waitIdx).toBeGreaterThanOrEqual(0);
+    expect(fillIdx).toBeGreaterThan(waitIdx);
   });
 });

@@ -113,6 +113,13 @@ type PageState = {
   url: string | null;
   title: string | null;
   bodyClass: string | null;
+  /**
+   * `document.querySelectorAll('input').length` at capture time.
+   * Discriminates the "form not yet mounted" race (bodyClass set but
+   * inputCount === 0) from a markup change (inputCount > 0 but the
+   * task's selectors miss). Null when the probe couldn't run.
+   */
+  inputCount: number | null;
 };
 
 /**
@@ -122,7 +129,7 @@ type PageState = {
  * context was destroyed, or the target was closed.
  */
 async function capturePageState(page: Page): Promise<PageState> {
-  const state: PageState = { url: null, title: null, bodyClass: null };
+  const state: PageState = { url: null, title: null, bodyClass: null, inputCount: null };
   try {
     state.url = page.url();
   } catch {
@@ -134,7 +141,18 @@ async function capturePageState(page: Page): Promise<PageState> {
     /* page.title() can throw on detached frames. */
   }
   try {
-    state.bodyClass = await page.evaluate(() => document.body?.className ?? '');
+    /* Single evaluate so bodyClass and inputCount come from the same
+     * DOM snapshot (a separate round-trip could observe them at
+     * different points in a re-render). */
+    const probe = await page.evaluate(() => ({
+      bodyClass: document.body?.className ?? '',
+      inputCount: document.querySelectorAll('input').length,
+    }));
+    if (probe && typeof probe === 'object') {
+      const typed = probe as { bodyClass?: unknown; inputCount?: unknown };
+      if (typeof typed.bodyClass === 'string') state.bodyClass = typed.bodyClass;
+      if (typeof typed.inputCount === 'number') state.inputCount = typed.inputCount;
+    }
   } catch {
     /* Execution context destroyed during nav timeout, etc. */
   }
@@ -169,7 +187,7 @@ export async function dumpFailureDiagnostics(
     const pngPath = path.join(dumpDir, `${stem}.png`);
     const jsonPath = path.join(dumpDir, `${stem}.json`);
 
-    let pageState: PageState = { url: null, title: null, bodyClass: null };
+    let pageState: PageState = { url: null, title: null, bodyClass: null, inputCount: null };
     if (page) {
       pageState = await capturePageState(page);
       try {

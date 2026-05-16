@@ -46,20 +46,33 @@ export credentials.
 3. GDPR consent: check if `SEL_GDPR_CONSENT` exists. If it does,
    click it. If not, skip (it only appears on first visit or cleared
    cookies). Do not throw if absent.
-4. Find the input element whose associated label or placeholder text
+4. Wait (up to 30 seconds) for an email input to appear in the DOM.
+   `SEL_SIGN_IN` (`body.auth-sign_in`) is set by MN's router at
+   `domcontentloaded`, *before* the React auth form has rendered, so
+   matching that selector alone is not enough — `fillEmail`'s
+   one-shot `evaluate` would race the form-mount and throw
+   `"email input not found"`. The predicate must mirror the
+   placeholder / aria-label / `<label for=…>` lookup used by
+   `fillEmail` so the wait's success means `fillEmail` will succeed.
+5. Find the input element whose associated label or placeholder text
    is `TXT_EMAIL`. Fill it with `process.env.MN_EMAIL`.
-5. Click the element whose visible text is `TXT_NEXT`.
-6. Wait for the "Sign In with Password" link to appear. Click the
+6. Click the element whose visible text is `TXT_NEXT`.
+7. Wait for the "Sign In with Password" link to appear. Click the
    element whose visible text is `TXT_SIGN_IN_WITH_PASSWORD`.
-7. Find the input element whose associated label or placeholder text
+8. Wait (up to 30 seconds) for a password input to appear in the DOM
+   (same rationale as step 4 — the click triggers a route transition
+   and the password input mounts a beat later). Predicate must mirror
+   `fillPassword`'s lookup, including its `input[type=password]`
+   fallback.
+9. Find the input element whose associated label or placeholder text
    is `TXT_PASSWORD`. Fill it with `process.env.MN_PASSWORD`.
-8. Click the element whose visible text is `TXT_NEXT`.
-9. Wait (max 15 seconds) for either `SEL_SIGNED_IN` **or**
-   `SEL_PRIVACY_AGREEMENT` to appear. If neither appears, throw:
-   `"Login failed — check credentials or MN_COMMUNITY_URL in .env"`
-10. Run the privacy-agreement handler (see below). It is a no-op when
+10. Click the element whose visible text is `TXT_NEXT`.
+11. Wait (max 15 seconds) for either `SEL_SIGNED_IN` **or**
+    `SEL_PRIVACY_AGREEMENT` to appear. If neither appears, throw:
+    `"Login failed — check credentials or MN_COMMUNITY_URL in .env"`
+12. Run the privacy-agreement handler (see below). It is a no-op when
     `SEL_PRIVACY_AGREEMENT` is absent.
-11. Wait for `SEL_SIGNED_IN` (max 30 seconds).
+13. Wait for `SEL_SIGNED_IN` (max 30 seconds).
 
 ## Privacy Agreement Handler
 
@@ -69,7 +82,7 @@ immediately after a successful login or — for an already-authenticated
 session — as the first page returned when navigating to any admin URL.
 The handler MUST be invoked in both places:
 
-- Inside `login()` after the password submit (step 10 above).
+- Inside `login()` after the password submit (step 12 above).
 - Inside `loginIfNeeded()` right after the app shell wait, *before*
   dispatching to the landing / sign-in / signed-in branches.
 
@@ -93,9 +106,11 @@ see the new (`communities-app`) shell.
 Call `log()` at each numbered step with a status string:
 - `"Navigating to login page..."`
 - `"Handling GDPR consent..."` or `"No GDPR consent dialog — skipping"`
+- `"Waiting for email input..."`
 - `"Entering email..."`
 - `"Clicking Next..."`
 - `"Selecting password sign-in..."`
+- `"Waiting for password input..."`
 - `"Entering password..."`
 - `"Submitting login..."`
 - `"Privacy agreement page detected — completing form..."` (only when present)

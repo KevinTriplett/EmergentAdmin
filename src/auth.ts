@@ -29,6 +29,11 @@ export type LoginDeps = {
 
 const AUTH_SHELL_WAIT_MS = 10_000;
 const CHALLENGE_CLEAR_WAIT_MS = 90_000;
+/* `body.auth-sign_in` is set at domcontentloaded but the React auth
+ * form mounts later. Without this wait, fillEmail/fillPassword race
+ * the form-mount and throw "<x> input not found" mid-load. 30s gives
+ * even the slow deploy host comfortable headroom. */
+const AUTH_INPUT_WAIT_MS = 30_000;
 
 /** Clicks that trigger a document navigation often kill the context before `evaluate` returns. */
 function isExecutionContextDestroyedError(err: unknown): boolean {
@@ -73,6 +78,77 @@ async function clickFirstWithExactText(page: Page, text: string): Promise<void> 
   if (!clicked) {
     throw new Error(`Could not find clickable element with exact text: ${text}`);
   }
+}
+
+/**
+ * Postcondition wait after `waitForSelector(SEL_SIGN_IN)`: the body
+ * class is set early by MN's router, so the input itself is the real
+ * "ready to fill" signal. Predicate mirrors `fillEmail`'s lookup
+ * (placeholder / aria-label / `<label for=…>`) so the wait succeeds
+ * iff the subsequent `fillEmail` call will succeed.
+ *
+ * Per system_prompt §11, the predicate has no nested named
+ * functions — only inline anonymous arrows / imperative loops — so
+ * esbuild's `__name` shim cannot be injected.
+ */
+async function waitForEmailInput(page: Page): Promise<void> {
+  await page.waitForFunction(
+    (emailLabel) => {
+      for (const el of document.querySelectorAll('input')) {
+        const inp = el as HTMLInputElement;
+        const ph = inp.getAttribute('placeholder') || '';
+        const aria = inp.getAttribute('aria-label') || '';
+        if (ph.includes(emailLabel) || aria.includes(emailLabel)) return true;
+      }
+      for (const labelEl of document.querySelectorAll('label')) {
+        const text = labelEl.textContent || '';
+        if (text.includes(emailLabel)) {
+          const forId = labelEl.getAttribute('for');
+          if (forId) {
+            const linked = document.getElementById(forId);
+            if (linked && linked.tagName === 'INPUT') return true;
+          }
+        }
+      }
+      return false;
+    },
+    { timeout: AUTH_INPUT_WAIT_MS },
+    TXT_EMAIL,
+  );
+}
+
+/**
+ * Postcondition wait after clicking "Sign In with Password". The
+ * password input mounts after a route transition, so the click alone
+ * doesn't guarantee the input is in the DOM. Predicate mirrors
+ * `fillPassword`'s lookup, including the final `input[type=password]`
+ * fallback so labels-stripped re-renders still satisfy the wait.
+ */
+async function waitForPasswordInput(page: Page): Promise<void> {
+  await page.waitForFunction(
+    (pwdLabel) => {
+      for (const el of document.querySelectorAll('input')) {
+        const inp = el as HTMLInputElement;
+        if (inp.getAttribute('type') !== 'password') continue;
+        const ph = inp.getAttribute('placeholder') || '';
+        const aria = inp.getAttribute('aria-label') || '';
+        if (ph.includes(pwdLabel) || aria.includes(pwdLabel)) return true;
+      }
+      for (const labelEl of document.querySelectorAll('label')) {
+        const text = labelEl.textContent || '';
+        if (text.includes(pwdLabel)) {
+          const forId = labelEl.getAttribute('for');
+          if (forId) {
+            const linked = document.getElementById(forId);
+            if (linked && linked.tagName === 'INPUT') return true;
+          }
+        }
+      }
+      return document.querySelector('input[type="password"]') !== null;
+    },
+    { timeout: AUTH_INPUT_WAIT_MS },
+    TXT_PASSWORD,
+  );
 }
 
 async function fillEmail(page: Page, email: string): Promise<void> {
@@ -285,6 +361,13 @@ export async function login(page: Page, log: LogFn): Promise<{ success: true }> 
     await log('Waiting for app shell...');
     await page.waitForSelector(SEL_SIGN_IN, { timeout: 60_000 });
 
+    /* SEL_SIGN_IN matches at domcontentloaded (router) — the React
+     * auth form mounts a beat later. Wait for the email input itself
+     * before calling fillEmail, otherwise the one-shot evaluate
+     * inside it races the form-mount and throws. */
+    await log('Waiting for email input...');
+    await waitForEmailInput(page);
+
     await log('Entering email...');
     await fillEmail(page, email);
 
@@ -307,6 +390,12 @@ export async function login(page: Page, log: LogFn): Promise<{ success: true }> 
       TXT_SIGN_IN_WITH_PASSWORD,
     );
     await clickFirstWithExactText(page, TXT_SIGN_IN_WITH_PASSWORD);
+
+    /* Same race as the email input — the password input mounts after
+     * a route transition, so the click alone doesn't guarantee it's
+     * in the DOM. */
+    await log('Waiting for password input...');
+    await waitForPasswordInput(page);
 
     await log('Entering password...');
     await fillPassword(page, password);

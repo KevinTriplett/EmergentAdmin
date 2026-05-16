@@ -5,6 +5,7 @@
     * `page.url` — exact URL in the address bar
     * `page.title` — `"Just a moment..."` is the Cloudflare giveaway
     * `page.bodyClass` — `cf-challenge`, `auth-sign_in`, `communities-landing`, etc.
+    * `page.inputCount` — `document.querySelectorAll('input').length`. Discriminates a "form not yet mounted" race (`inputCount === 0` while `bodyClass='auth-sign_in'`) from a markup change (`inputCount > 0` but the task's selectors miss).
     * `error.message` and `error.stack` — the original failure
 * A `[diag] dumped failure context: <png path> | <json path>` line appears in the run log so you can find the dump easily.
 

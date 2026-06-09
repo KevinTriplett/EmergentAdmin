@@ -175,6 +175,42 @@ Files:
   resolver (`resolveAuditCronExpr`) + cron schedule.
 - `public/index.html` — audit button + handler.
 
+### Stage 4f: Audit Anomalies -- DONE
+
+As part of the daily audit run, the change-of-heart audit job now also
+collects **every** comment on every agreement post whose text does not
+match `AGREE_PATTERN`, regardless of whether the commenter has an
+`agreements` row. Each entry carries a clickable deep-link to the
+comment on the live MN post (`/posts/{articleId}/comments/{commentId}`,
+falling back to the post URL when `commentId` is empty), the
+commenter's name/id, and a truncated text sample.
+
+- `src/tasks/changeOfHeartAuditJob.ts` —
+  - New `NonMatchingComment` type and `nonMatchingComments: NonMatchingComment[]`
+    fields on both `ChangeOfHeartArticleResult` (per-article) and
+    `ChangeOfHeartAuditResult` (aggregated), plus a
+    `totalNonMatchingComments` counter that mirrors `totalAnomalies`.
+  - List uses the existing `dedupeByCommentId` set so MN UI artifacts
+    don't fake duplicate entries.
+  - `summarize()` appends a `(+N non-matching comment(s))` tail to both
+    the "all clear" and the "N anomalies" message so the email
+    subject line surfaces it.
+  - `renderAuditHtml` adds a `<h3>Non-matching comments</h3>` section
+    listing each entry as a link to the comment; the section is
+    omitted entirely when the list is empty so the legacy "all
+    clear" body is unchanged in the common case.
+- `public/index.html` — the Audit button result panel now renders two
+  friendly lists (Change-of-heart anomalies / Non-matching comments)
+  with clickable links per row, plus a collapsed `<details>` tail
+  preserving the raw JSON for tooling. Each non-matching comment
+  links straight to the deep MN comment URL the server computed.
+- Tests: `test/changeOfHeartAuditJob.test.ts` — new "Stage 4f —
+  non-matching comments list" describe block covering filtering,
+  page-scoped (vs store-scoped) inclusion, comment URL shape,
+  empty-commentId fallback, truncation, dedupe respect,
+  cross-article aggregation, summary tails, and HTML escaping.
+
+
 ## TODO
 - index.html after clicking an action button (Remove or Add) replace those action
 buttons with the Abort button -- DONE

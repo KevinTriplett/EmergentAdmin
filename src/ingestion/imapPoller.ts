@@ -55,7 +55,7 @@ export type ImapPollerDeps = {
   enqueueMalformedDm?: MalformedDmTrigger;
   /** Injectable for tests. Defaults to the production `AGREEMENT_ARTICLES` lookup. */
   findAgreementArticle?: (articleId: string) => AgreementArticle | null;
-  /** Injectable for tests. Defaults to the production `AGREE_PATTERN` matcher. */
+  /** Injectable for tests. Defaults to the production `isAgreementText` matcher. */
   isAgreementText?: (text: string) => boolean;
   log?: (message: string) => void;
 };

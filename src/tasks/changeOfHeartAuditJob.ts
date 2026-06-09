@@ -83,8 +83,8 @@ export type AnomalyEntry = {
   articleUrl: string;
   state: Extract<AuditState, 'deleted' | 'edited' | 'mixed'>;
   /**
-   * For 'edited' / 'mixed': the text(s) that did not match AGREE_PATTERN, so
-   * the admin can see *what* the member wrote without opening the post.
+   * For 'edited' / 'mixed': the text(s) that did not match the agreement
+   * matcher, so the admin can see *what* the member wrote without opening the post.
    * Empty for 'deleted' (no comments to sample). Capped to keep the email
    * compact.
    */
@@ -93,7 +93,7 @@ export type AnomalyEntry = {
 
 /**
  * Stage 4f — a single comment on an agreement post whose text does not
- * match the strict `AGREE_PATTERN`. Surfaced verbatim in the audit result
+ * match the agreement matcher (`isAgreementText`). Surfaced verbatim in the audit result
  * (and the admin email) with a deep-link back to the comment on the live
  * MN post so an admin can one-click into the offending comment for
  * follow-up. This is independent of `AnomalyEntry`:
@@ -211,8 +211,8 @@ export function buildChangeOfHeartAuditJob(
         const byMember = groupCommentsByMember(deduped);
         const members = store.listMembersForArticle(article.articleId);
 
-        /* Stage 4f: every comment whose text fails the strict agree
-         * regex, regardless of whether the commenter has an
+        /* Stage 4f: every comment whose text fails the agreement
+         * matcher, regardless of whether the commenter has an
          * `agreements` row. This is the forensic list — the operator
          * wants to be able to one-click into each comment from the
          * UI / email. We use the same `deduped` list so MN UI

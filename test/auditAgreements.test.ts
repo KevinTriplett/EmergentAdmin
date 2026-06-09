@@ -18,7 +18,7 @@ describe('classifyMemberOnArticle', () => {
     expect(classifyMemberOnArticle([])).toBe('deleted');
   });
 
-  it('returns "happy" for a single comment matching AGREE_PATTERN', () => {
+  it('returns "happy" for a single comment matching the agreement matcher', () => {
     expect(classifyMemberOnArticle([{ text: 'I agree' }])).toBe('happy');
   });
 
@@ -72,8 +72,9 @@ describe('classifyMemberOnArticle', () => {
   });
 
   it('uses an injected matcher when supplied (for tests / config swap)', () => {
-    /* Verifies the classifier doesn't bake in the production AGREE_PATTERN
-     * — useful if the threshold language ever shifts community-by-community. */
+    /* Verifies the classifier doesn't bake in the production agreement
+     * matcher — useful if the threshold language ever shifts
+     * community-by-community. */
     const onlyShouty = (s: string): boolean => s === 'I AGREE!!!';
     expect(
       classifyMemberOnArticle(
@@ -82,5 +83,66 @@ describe('classifyMemberOnArticle', () => {
       ),
     ).toBe('multi_agreement');
     expect(classifyMemberOnArticle([{ text: 'I agree' }], onlyShouty)).toBe('edited');
+  });
+
+  /* -----------------------------------------------------------------
+   * Loose-matcher fixtures.
+   *
+   * These pin the production matcher's behaviour through the
+   * classifier (the default matcher is plugged in unless tests pass
+   * one explicitly). The matcher is Candidate D: a positive "I … agree"
+   * or bare "Agreed" shape anchored at end-of-string, vetoed by an
+   * explicit "not agree" / "disagree" negation. See
+   * src/config/agreements.ts for the contract.
+   *
+   * Why pin behaviour here rather than in a dedicated matcher test:
+   * the contract that matters to the rest of the system is "how does
+   * the classifier behave on this text?" — that's what drives audit
+   * verdicts and the IMAP auto-add path. Exercising it through the
+   * classifier keeps the spec-level intent visible.
+   * --------------------------------------------------------------- */
+  describe('loose-matcher (production default) verdicts', () => {
+    /* Variants the strict regex used to reject but that read as
+     * unambiguous agreements. The new matcher must accept them, or
+     * Stage 4f forensic noise piles up and the IMAP auto-add path
+     * keeps DM'ing people who clearly said yes. */
+    it.each([
+      ['I agree!'],
+      ['i also agree!'],
+      ['Yes, I agree.'],
+      ['I really agree.'],
+      ['I do absolutely agree.'],
+      ['Agreed!'],
+      ['Agreed.'],
+    ])('treats %j as "happy" (accepted loose variant)', (text) => {
+      expect(classifyMemberOnArticle([{ text }])).toBe('happy');
+    });
+
+    /* Explicit negations must veto regardless of "I … agree" shape.
+     * Without the negation veto these would auto-add the member to
+     * commons spaces — see the rationale in
+     * src/config/agreements.ts above AGREE_NEGATION_PATTERN. */
+    it.each([
+      ['I do not agree'],
+      ['I cannot agree'],
+      ['I disagree'],
+      ['I disagree.'],
+      ['I agree to disagree'],
+    ])('treats %j as "edited" (negation vetoes the loose shape)', (text) => {
+      expect(classifyMemberOnArticle([{ text }])).toBe('edited');
+    });
+
+    /* Comments that lack the closing "agree" / "Agreed" clause are
+     * still malformed even if they happen to contain the word
+     * "agree" somewhere upstream. Anchoring the shape at end-of-
+     * string is what prevents the IMAP poller from auto-adding
+     * people whose comment was a hedge or off-topic. */
+    it.each([
+      ['I agree with point 1 but not 3'],
+      ['hi everyone, just lurking'],
+      ['Maybe later'],
+    ])('treats %j as "edited" (no closing agreement clause)', (text) => {
+      expect(classifyMemberOnArticle([{ text }])).toBe('edited');
+    });
   });
 });

@@ -29,8 +29,10 @@ Five sub-stages (4a Foundation, 4b DM moderation, 4c Reconciliation cron,
 
 ### Stage 4a: Foundation -- DONE
 - `src/config/agreements.ts` - `AGREEMENT_ARTICLES` (currently a single
-  entry; collapse/expand the array to change the threshold), `AGREE_PATTERN`
-  strict matcher, lookup helpers, and shared `postUrl`/`commentUrl` builders.
+  entry; collapse/expand the array to change the threshold), the loose
+  agreement matcher (`isAgreementText` — positive "I ... agree" / "Agreed"
+  shape anchored at end-of-string, vetoed by a "not agree" / "disagree"
+  negation), lookup helpers, and shared `postUrl`/`commentUrl` builders.
 - `src/state/agreementsStore.ts` - SQLite-backed store (better-sqlite3)
   with atomic `claimAddForMember` dedup guardrail; `processed_emails`
   table for IMAP replay safety. Auto-creates `./data/ec-admin.db` (override
@@ -179,7 +181,7 @@ Files:
 
 As part of the daily audit run, the change-of-heart audit job now also
 collects **every** comment on every agreement post whose text does not
-match `AGREE_PATTERN`, regardless of whether the commenter has an
+match the agreement matcher (`isAgreementText`), regardless of whether the commenter has an
 `agreements` row. Each entry carries a clickable deep-link to the
 comment on the live MN post (`/posts/{articleId}/comments/{commentId}`,
 falling back to the post URL when `commentId` is empty), the

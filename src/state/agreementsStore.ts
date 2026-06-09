@@ -55,9 +55,9 @@ export type MemberSpaceAttempt = {
 /**
  * Stage 4e change-of-heart audit verdict for one (member, article) pair.
  *
- *   happy            - exactly one current comment, matches AGREE_PATTERN.
+ *   happy            - exactly one current comment, matches `isAgreementText`.
  *   deleted          - no current comment from this member.
- *   edited           - exactly one current comment, does NOT match AGREE_PATTERN.
+ *   edited           - exactly one current comment, does NOT match `isAgreementText`.
  *   mixed            - multiple current comments, at least one does NOT match.
  *   multi_agreement  - multiple current comments, all match.
  *

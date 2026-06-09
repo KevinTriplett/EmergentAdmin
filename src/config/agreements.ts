@@ -57,19 +57,47 @@ export const AGREEMENT_ARTICLES: readonly AgreementArticle[] = [
 export const REQUIRED_AGREEMENT_COUNT = AGREEMENT_ARTICLES.length;
 
 /**
- * Strict match: the comment text, after trim, must be exactly "I agree" or
- * "I agree." (case-insensitive). Anything else is "malformed" per Kevin's
- * policy in clarifications / chat: we DM the member rather than try to
- * interpret their intent.
+ * Loose match: a comment counts as an agreement if it has one of two
+ * positive shapes AND does not contain an explicit negation. Tolerates
+ * the common variants the strict regex used to reject ("i also agree!",
+ * "Yes, I really agree.", "Agreed!") without opening the door to off-
+ * topic comments — anything that doesn't end on "agree[.!?…]" or a bare
+ * "Agreed" is still treated as malformed and DM'd per Kevin's policy.
+ *
+ *   Positive shape A — "I [≤3 adverbs] agree" as the closing clause:
+ *     "I agree", "I agree.", "I agree!", "i also agree!",
+ *     "Yes, I really agree.", "I do absolutely agree :)".
+ *
+ *   Positive shape B — a bare "Agreed":
+ *     "Agreed", "Agreed.", "Agreed!".
+ *
+ *   Negation veto — vetoes either shape regardless:
+ *     /not\s+agree/  catches "I do not agree", "cannot agree"
+ *                    (intentionally no \b before "not" so "cannot"
+ *                     is also caught).
+ *     /disagree/     catches "I disagree", "I disagreed",
+ *                    "I agree to disagree", "disagreement".
+ *
+ * The shapes are anchored at end-of-string (with optional trailing
+ * non-word chars) so a comment that *begins* with "I agree" but goes
+ * on to say other things ("I agree with point 1 but not 3") is not
+ * counted as an unqualified agreement — those still get the DM-for-
+ * clarification treatment from the IMAP poller, and surface as an
+ * anomaly in the change-of-heart audit.
  */
-export const AGREE_PATTERN = /^\s*i\s+agree\.?\s*$/i;
+export const AGREE_SHAPE_I_AGREE = /\bi\s+(?:\w+\s+){0,3}agree\b\W*$/i;
+export const AGREE_SHAPE_AGREED = /^\s*agreed\b\W*$/i;
+export const AGREE_NEGATION_PATTERN = /not\s+agree|disagree/i;
 
 /** Lookup an agreement by its MN article id. Returns null for non-agreements. */
 export function findAgreementArticle(articleId: string): AgreementArticle | null {
   return AGREEMENT_ARTICLES.find((a) => a.articleId === articleId) ?? null;
 }
 
-/** True iff the given comment text is a strict agreement. */
+/** True iff the given comment text reads as an agreement. */
 export function isAgreementText(text: string): boolean {
-  return AGREE_PATTERN.test(text);
+  const t = text.trim();
+  if (t.length === 0) return false;
+  if (AGREE_NEGATION_PATTERN.test(t)) return false;
+  return AGREE_SHAPE_I_AGREE.test(t) || AGREE_SHAPE_AGREED.test(t);
 }

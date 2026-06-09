@@ -939,6 +939,68 @@
             .replace(/"/g, '&quot;');
         }
 
+        /**
+         * Stage 4f: friendly audit-result renderer for the Audit button. The
+         * server returns a structured ChangeOfHeartAuditResult; this helper
+         * pulls out the two operator-facing lists (anomalies + non-matching
+         * comments) and renders each as a clickable list, falling back to
+         * a soft "all clear" message when both are empty. The full JSON
+         * payload is preserved as a collapsed <details> tail for tooling /
+         * copy-paste — the operator can still grab it but it doesn't
+         * dominate the panel.
+         */
+        function renderAuditResultHtml(body, totalAnomalies, nonMatching) {
+          const anomalies = Array.isArray(body.anomalies) ? body.anomalies : [];
+          let html =
+            '<strong>Audit complete — ' + escapeHtml(String(totalAnomalies)) +
+            ' anomaly(ies), ' + escapeHtml(String(nonMatching.length)) +
+            ' non-matching comment(s)</strong>';
+
+          if (anomalies.length === 0 && nonMatching.length === 0) {
+            html += '<p>All clear. Every agreement comment matches the agree regex and no recorded member has changed their mind.</p>';
+          }
+
+          if (anomalies.length > 0) {
+            html += '<h4 style="margin:0.75rem 0 0.25rem">Change-of-heart anomalies</h4><ul>';
+            anomalies.forEach(function (a) {
+              const memberName = escapeHtml(String(a.fullName || '(unknown)'));
+              const state = escapeHtml(String(a.state || ''));
+              const articleTitle = escapeHtml(String(a.articleTitle || ''));
+              const articleUrl = escapeHtml(String(a.articleUrl || ''));
+              const sample =
+                Array.isArray(a.sampleNonMatchingText) && a.sampleNonMatchingText.length > 0
+                  ? ' — <em>' + escapeHtml(String(a.sampleNonMatchingText[0])) + '</em>'
+                  : '';
+              html +=
+                '<li><strong>' + memberName + '</strong> — ' + state +
+                ' on <a href="' + articleUrl + '" target="_blank" rel="noopener">' +
+                articleTitle + '</a>' + sample + '</li>';
+            });
+            html += '</ul>';
+          }
+
+          if (nonMatching.length > 0) {
+            html += '<h4 style="margin:0.75rem 0 0.25rem">Non-matching comments (Stage 4f)</h4>';
+            html += '<p style="margin:0 0 0.5em 0;font-size:13px;opacity:0.85">Comments on agreement posts whose text does not match the "I agree" regex. Click a name to open the comment on MN.</p>';
+            html += '<ul>';
+            nonMatching.forEach(function (c) {
+              const author = escapeHtml(String(c.fullName || '(unknown commenter)'));
+              const articleTitle = escapeHtml(String(c.articleTitle || ''));
+              const url = escapeHtml(String(c.url || ''));
+              const sample = c.text ? ' — <em>' + escapeHtml(String(c.text)) + '</em>' : '';
+              html +=
+                '<li><a href="' + url + '" target="_blank" rel="noopener">' +
+                author + '</a> on ' + articleTitle + sample + '</li>';
+            });
+            html += '</ul>';
+          }
+
+          html +=
+            '<details style="margin-top:0.75rem"><summary>Raw JSON</summary>' +
+            '<pre>' + escapeHtml(JSON.stringify(body, null, 2)) + '</pre></details>';
+          return html;
+        }
+
         function sendAbort() {
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'abort' }));
@@ -1418,12 +1480,19 @@
               return;
             }
             const total = typeof body.totalAnomalies === 'number' ? body.totalAnomalies : '?';
-            appendLog('[audit] Done — ' + total + ' anomaly(ies) across ' + (body.articles ? body.articles.length : '?') + ' article(s).');
+            const nonMatching = Array.isArray(body.nonMatchingComments) ? body.nonMatchingComments : [];
+            appendLog(
+              '[audit] Done — ' + total + ' anomaly(ies), ' + nonMatching.length +
+              ' non-matching comment(s), across ' + (body.articles ? body.articles.length : '?') + ' article(s).',
+            );
+            /* Stage 4f: render the audit result as anomalies (change of
+             * heart) + non-matching comments (any comment that fails
+             * the agree regex) with a one-click link back to each
+             * comment on the live MN post. The full JSON is preserved
+             * as a collapsed <details> tail for tooling. */
             showResult(
-              '<strong>Audit complete — ' + total + ' anomaly(ies)</strong><pre>' +
-                escapeHtml(JSON.stringify(body, null, 2)) +
-                '</pre>',
-              total > 0,
+              renderAuditResultHtml(body, total, nonMatching),
+              total > 0 || nonMatching.length > 0,
             );
             void refreshAgreementsStatus({ quiet: true });
           } catch (e) {

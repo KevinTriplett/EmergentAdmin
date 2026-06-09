@@ -607,4 +607,282 @@ describe('buildChangeOfHeartAuditJob', () => {
     expect(result.totalAnomalies).toBe(0);
     expect(store.getAuditState(MEMBERS.carol.memberId, ART_A.articleId)).toBeNull();
   });
+
+  /* -----------------------------------------------------------------
+   * Stage 4f — Audit Anomalies (non-matching comments)
+   *
+   * The spec calls this out separately from the change-of-heart
+   * cases: "As part of the daily audit run, I need to know if any
+   * comments do not fit the 'I agree' regex with a link back to the
+   * comment. List these in the interface along with all other
+   * anomalies, for check up."
+   *
+   * The forensic list is page-scoped (every non-matching comment
+   * on every agreement post), NOT store-scoped — so a comment
+   * from a member who never recorded an agreement still surfaces.
+   * Each entry carries a `url` field with the deep-link MN uses
+   * for individual comments (`/posts/{articleId}/comments/{commentId}`)
+   * so the operator can one-click into the offending comment.
+   * --------------------------------------------------------------- */
+  describe('Stage 4f — non-matching comments list', () => {
+    it('omits agreement comments and includes only non-matching ones', async () => {
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.alice, 'I agree', 'c-1'),
+          comment(MEMBERS.bob, 'I agree.', 'c-2'),
+          comment(MEMBERS.carol, 'Wait — what about clause 3?', 'c-3'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      expect(result.totalNonMatchingComments).toBe(1);
+      expect(result.nonMatchingComments).toHaveLength(1);
+      expect(result.nonMatchingComments[0]!.memberId).toBe(MEMBERS.carol.memberId);
+      expect(result.nonMatchingComments[0]!.fullName).toBe(MEMBERS.carol.fullName);
+      expect(result.nonMatchingComments[0]!.text).toBe('Wait — what about clause 3?');
+    });
+
+    it('includes non-matching comments from commenters who have no agreements row (page-scoped, not store-scoped)', async () => {
+      /* Carol has NEVER recorded an agreement (store is empty). Her
+       * stray non-matching comment still surfaces — that's the whole
+       * point of Stage 4f's forensic list. */
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, 'hi everyone, just lurking', 'c-stray'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      /* No store-scoped anomaly (Carol has no row to downgrade)... */
+      expect(result.totalAnomalies).toBe(0);
+      /* ...but the comment still shows up in the forensic list. */
+      expect(result.totalNonMatchingComments).toBe(1);
+      expect(result.nonMatchingComments[0]!.memberId).toBe(MEMBERS.carol.memberId);
+    });
+
+    it('builds a clickable comment URL of the form /posts/{articleId}/comments/{commentId}', async () => {
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, 'no thanks', 'c-xyz'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      expect(result.nonMatchingComments[0]!.url).toBe(
+        'https://emergent-commons.mn.co/posts/art-A/comments/c-xyz',
+      );
+    });
+
+    it('falls back to the post URL when commentId is empty (defensive)', async () => {
+      /* MN's DOM has always rendered `data-detail-comment`, but if it
+       * ever stops doing so we still want a clickable URL — landing
+       * on the article is better than an unclickable list entry. */
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, 'no comment id here', ''),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      expect(result.nonMatchingComments[0]!.url).toBe(ART_A.url);
+    });
+
+    it('truncates long comment text the same way anomaly samples are truncated', async () => {
+      const longText = 'x'.repeat(500);
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, longText, 'c-long'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      /* SAMPLE_TEXT_TRUNCATE = 200 → 199 chars + '…' = 200 total. */
+      expect(result.nonMatchingComments[0]!.text.length).toBe(200);
+      expect(result.nonMatchingComments[0]!.text.endsWith('…')).toBe(true);
+    });
+
+    it('respects the silent dedupe-by-commentId so MN UI artifacts do not double-count non-matching rows', async () => {
+      /* Same dedup that protects the multi_agreement classifier
+       * (verified live May 2026 — MN sometimes renders the same
+       * logical comment twice). The forensic list must use the
+       * deduped set too, otherwise a single off-topic comment shows
+       * up as two entries to chase. */
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, 'no thanks', 'c-dup'),
+          comment(MEMBERS.carol, 'no thanks', 'c-dup'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      expect(result.totalNonMatchingComments).toBe(1);
+    });
+
+    it('aggregates non-matching comments across articles', async () => {
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A, ART_B],
+        loadAndScrapeArticleComments: async (_p, articleId) => {
+          if (articleId === ART_A.articleId) {
+            return [comment(MEMBERS.alice, 'I disagree', 'a-1')];
+          }
+          return [
+            comment(MEMBERS.bob, 'maybe later', 'b-1'),
+            comment(MEMBERS.carol, 'I agree', 'b-2'),
+          ];
+        },
+      });
+
+      const result = await job.run(makeCtx());
+
+      expect(result.totalNonMatchingComments).toBe(2);
+      const byArticle = result.nonMatchingComments.map((c) => c.articleId).sort();
+      expect(byArticle).toEqual(['art-A', 'art-B']);
+      /* Per-article tally agrees with the aggregate. */
+      const articleA = result.articles.find((a) => a.articleId === ART_A.articleId)!;
+      const articleB = result.articles.find((a) => a.articleId === ART_B.articleId)!;
+      expect(articleA.nonMatchingComments).toHaveLength(1);
+      expect(articleB.nonMatchingComments).toHaveLength(1);
+    });
+
+    it('summarize() appends a non-matching-comment tail to "all clear" runs', async () => {
+      /* Even when nobody has changed their mind, the operator wants to
+       * see in the subject line that there are N off-topic comments to
+       * triage. */
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, 'random thought', 'c-1'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      const summary = job.summarize(result);
+      expect(summary).toMatch(/all clear/);
+      expect(summary).toContain('(+1 non-matching comment)');
+    });
+
+    it('summarize() appends a non-matching-comment tail to the anomaly list', async () => {
+      store.recordAgreement({
+        memberId: MEMBERS.alice.memberId,
+        fullName: MEMBERS.alice.fullName,
+        articleId: ART_A.articleId,
+        commentId: 'c-old',
+        commentedAt: 1,
+        source: 'email',
+      });
+
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.alice, 'changed my mind', 'c-1'),
+          comment(MEMBERS.carol, 'random', 'c-2'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      const summary = job.summarize(result);
+      /* "1 anomaly: ..." — the singular/plural is exercised
+       * elsewhere; here we care that the non-matching tail rides
+       * along after the change-of-heart payload. */
+      expect(summary).toMatch(/^1 anomaly:/);
+      expect(summary).toMatch(/\(\+2 non-matching comments\)$/);
+    });
+
+    it('htmlBody renders a "Non-matching comments" section with a clickable link per comment', async () => {
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, 'wait, no', 'c-xyz'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+      const html = job.htmlBody!(result);
+
+      expect(html).toMatch(/Non-matching comments/);
+      expect(html).toContain(
+        '<a href="https://emergent-commons.mn.co/posts/art-A/comments/c-xyz">Carol Cole</a>',
+      );
+      /* The comment text is included as the forensic sample so the
+       * admin can decide whether to follow the link. */
+      expect(html).toContain('wait, no');
+    });
+
+    it('htmlBody omits the Non-matching comments section entirely when the list is empty', async () => {
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [],
+      });
+
+      const result = await job.run(makeCtx());
+      const html = job.htmlBody!(result);
+
+      expect(html).not.toMatch(/Non-matching comments/);
+    });
+
+    it('htmlBody renders the Non-matching section alongside the anomaly list when both are populated', async () => {
+      /* Both lists coexist in the same email and the same UI panel —
+       * the spec calls Stage 4f a list "along with all other
+       * anomalies", so neither suppresses the other. */
+      store.recordAgreement({
+        memberId: MEMBERS.alice.memberId,
+        fullName: MEMBERS.alice.fullName,
+        articleId: ART_A.articleId,
+        commentId: 'c-old',
+        commentedAt: 1,
+        source: 'email',
+      });
+
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.alice, 'changed my mind', 'c-alice'),
+          comment(MEMBERS.carol, 'unrelated', 'c-carol'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+      const html = job.htmlBody!(result);
+
+      /* Anomaly side: Alice via chats/new (change of heart). */
+      expect(html).toContain('chats/new?user_id=');
+      /* Stage 4f side: Carol via comment deep link. */
+      expect(html).toContain('/posts/art-A/comments/c-carol');
+    });
+
+    it('escapes HTML in non-matching comment text and member names', async () => {
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          {
+            commentId: 'c-1',
+            memberId: 'mallory',
+            fullName: '<script>alert(1)</script>',
+            text: '<img src=x onerror=alert(2)>',
+          },
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+      const html = job.htmlBody!(result);
+
+      expect(html).not.toContain('<script>alert(1)</script>');
+      expect(html).not.toContain('<img src=x onerror=alert(2)>');
+      expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    });
+  });
 });

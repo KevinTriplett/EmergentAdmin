@@ -1,6 +1,7 @@
 import type { Page } from 'puppeteer';
 import {
   AGREEMENT_ARTICLES,
+  commentUrl,
   postUrl,
   type AgreementArticle,
 } from '../config/agreements.js';
@@ -90,6 +91,43 @@ export type AnomalyEntry = {
   sampleNonMatchingText: string[];
 };
 
+/**
+ * Stage 4f — a single comment on an agreement post whose text does not
+ * match the strict `AGREE_PATTERN`. Surfaced verbatim in the audit result
+ * (and the admin email) with a deep-link back to the comment on the live
+ * MN post so an admin can one-click into the offending comment for
+ * follow-up. This is independent of `AnomalyEntry`:
+ *
+ *   - `AnomalyEntry` is keyed off the agreements store (the member must
+ *     already have a row in `agreements` for that article); it captures
+ *     "people whose effective count went down" — the change-of-heart
+ *     signal that drives eligibility.
+ *
+ *   - `NonMatchingComment` is keyed off the page: any commenter whose
+ *     text fails the regex is included, even if they have no row in
+ *     the store (e.g. a curious member who hasn't yet said "I agree",
+ *     a wandering off-topic comment, or a spammer). This is the
+ *     forensic list the operator asked for in Stage 4f — "any comments
+ *     that do not fit the I agree regex, with a link back to the
+ *     comment, for check up".
+ */
+export type NonMatchingComment = {
+  commentId: string;
+  memberId: string;
+  fullName: string;
+  articleId: string;
+  articleTitle: string;
+  /**
+   * Deep link to the comment on the live MN post when `commentId` is
+   * non-empty; falls back to the parent post URL otherwise (defensive —
+   * MN's DOM has always rendered `data-detail-comment` so far, but an
+   * empty id should still point the operator somewhere clickable).
+   */
+  url: string;
+  /** Comment text truncated to `SAMPLE_TEXT_TRUNCATE`. */
+  text: string;
+};
+
 const SAMPLE_TEXT_MAX = 5;
 const SAMPLE_TEXT_TRUNCATE = 200;
 
@@ -102,6 +140,8 @@ export type ChangeOfHeartArticleResult = {
   happyCount: number;
   multiAgreementCount: number;
   anomalies: AnomalyEntry[];
+  /** Stage 4f: every non-matching comment on this article, deduped. */
+  nonMatchingComments: NonMatchingComment[];
 };
 
 export type ChangeOfHeartAuditResult = {
@@ -110,6 +150,9 @@ export type ChangeOfHeartAuditResult = {
   anomalies: AnomalyEntry[];
   totalAnomalies: number;
   totalMembersAudited: number;
+  /** Stage 4f: every non-matching comment, aggregated across articles. */
+  nonMatchingComments: NonMatchingComment[];
+  totalNonMatchingComments: number;
 };
 
 export type ChangeOfHeartAuditDeps = {
@@ -144,6 +187,7 @@ export function buildChangeOfHeartAuditJob(
     run: async (ctx: BrowserJobContext): Promise<ChangeOfHeartAuditResult> => {
       const articleResults: ChangeOfHeartArticleResult[] = [];
       const allAnomalies: AnomalyEntry[] = [];
+      const allNonMatchingComments: NonMatchingComment[] = [];
       let totalMembersAudited = 0;
 
       for (const article of articles) {
@@ -166,6 +210,27 @@ export function buildChangeOfHeartAuditJob(
         const deduped = dedupeByCommentId(scraped);
         const byMember = groupCommentsByMember(deduped);
         const members = store.listMembersForArticle(article.articleId);
+
+        /* Stage 4f: every comment whose text fails the strict agree
+         * regex, regardless of whether the commenter has an
+         * `agreements` row. This is the forensic list — the operator
+         * wants to be able to one-click into each comment from the
+         * UI / email. We use the same `deduped` list so MN UI
+         * artifacts don't fake two non-matching entries from a single
+         * underlying comment. */
+        const nonMatchingForArticle: NonMatchingComment[] = deduped
+          .filter((c) => !textMatchesAgreement(c.text))
+          .map((c) => ({
+            commentId: c.commentId,
+            memberId: c.memberId,
+            fullName: c.fullName,
+            articleId: article.articleId,
+            articleTitle: article.title,
+            url: c.commentId
+              ? commentUrl(article.articleId, c.commentId)
+              : article.url ?? postUrl(article.articleId),
+            text: truncate(c.text, SAMPLE_TEXT_TRUNCATE),
+          }));
 
         let happyCount = 0;
         let multiAgreementCount = 0;
@@ -224,11 +289,13 @@ export function buildChangeOfHeartAuditJob(
           happyCount,
           multiAgreementCount,
           anomalies: anomaliesForArticle,
+          nonMatchingComments: nonMatchingForArticle,
         });
         allAnomalies.push(...anomaliesForArticle);
+        allNonMatchingComments.push(...nonMatchingForArticle);
 
         ctx.log(
-          `  audited ${members.length} member(s): ${happyCount} happy, ${multiAgreementCount} multi-agreement, ${anomaliesForArticle.length} anomaly(ies).`,
+          `  audited ${members.length} member(s): ${happyCount} happy, ${multiAgreementCount} multi-agreement, ${anomaliesForArticle.length} anomaly(ies), ${nonMatchingForArticle.length} non-matching comment(s).`,
         );
       }
 
@@ -237,22 +304,36 @@ export function buildChangeOfHeartAuditJob(
         anomalies: allAnomalies,
         totalAnomalies: allAnomalies.length,
         totalMembersAudited,
+        nonMatchingComments: allNonMatchingComments,
+        totalNonMatchingComments: allNonMatchingComments.length,
       };
     },
     summarize: (result: ChangeOfHeartAuditResult): string => {
       const pairsLabel = pluralize(result.totalMembersAudited, 'pair', 'pairs');
       const articlesLabel = pluralize(result.articles.length, 'article', 'articles');
+      /* Stage 4f: the non-matching-comments tail is appended to both
+       * the "all clear" and the "N anomalies" summary so the operator
+       * sees it regardless of whether anyone with an existing
+       * agreement row downgraded. `nonMatchingTail` returns the empty
+       * string when there are zero non-matching comments, keeping
+       * the legacy "all clear" message unchanged in the common case. */
       if (result.totalAnomalies === 0) {
-        return `0 anomalies — all clear (audited ${result.totalMembersAudited} member-article ${pairsLabel} across ${result.articles.length} ${articlesLabel})`;
+        return `0 anomalies — all clear (audited ${result.totalMembersAudited} member-article ${pairsLabel} across ${result.articles.length} ${articlesLabel})${nonMatchingTail(result)}`;
       }
       const items = result.anomalies
         .map((a) => `${a.fullName} (${a.state})`)
         .join(', ');
       const anomLabel = pluralize(result.totalAnomalies, 'anomaly', 'anomalies');
-      return `${result.totalAnomalies} ${anomLabel}: ${items}`;
+      return `${result.totalAnomalies} ${anomLabel}: ${items}${nonMatchingTail(result)}`;
     },
     htmlBody: renderAuditHtml,
   };
+}
+
+function nonMatchingTail(result: ChangeOfHeartAuditResult): string {
+  if (result.totalNonMatchingComments === 0) return '';
+  const label = pluralize(result.totalNonMatchingComments, 'comment', 'comments');
+  return ` (+${result.totalNonMatchingComments} non-matching ${label})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -269,8 +350,10 @@ export function buildChangeOfHeartAuditJob(
  * which makes the admin email actionable — one click DMs the member.
  */
 function renderAuditHtml(result: ChangeOfHeartAuditResult): string {
+  const nonMatchingSection = renderNonMatchingCommentsHtml(result.nonMatchingComments);
+
   if (result.totalAnomalies === 0) {
-    return `
+    const allClear = `
       <h3>Change-of-heart audit</h3>
       <p>0 anomalies — all clear (audited ${result.totalMembersAudited} member-article ${pluralize(
         result.totalMembersAudited,
@@ -281,6 +364,7 @@ function renderAuditHtml(result: ChangeOfHeartAuditResult): string {
         'article',
         'articles',
       )}).</p>`;
+    return allClear + nonMatchingSection;
   }
 
   const items = result.anomalies
@@ -309,6 +393,39 @@ function renderAuditHtml(result: ChangeOfHeartAuditResult): string {
     )}</h3>
     <ul>
       ${items}
+    </ul>${nonMatchingSection}`;
+}
+
+/**
+ * Stage 4f: render the "non-matching comments" section of the email. Each
+ * entry is a clickable deep-link to the comment on the live MN post so the
+ * admin can one-click into the offending comment from the email. Returns
+ * the empty string when the list is empty, so the surrounding template
+ * doesn't need to branch on it.
+ */
+function renderNonMatchingCommentsHtml(items: readonly NonMatchingComment[]): string {
+  if (items.length === 0) return '';
+
+  const lis = items
+    .map((c) => {
+      const commentLink = `<a href="${escapeHtml(c.url)}">${escapeHtml(
+        c.fullName || '(unknown commenter)',
+      )}</a>`;
+      const articleSuffix = ` on ${escapeHtml(c.articleTitle)}`;
+      const sample = c.text ? ` — <em>${escapeHtml(c.text)}</em>` : '';
+      return `<li>${commentLink}${articleSuffix}${sample}</li>`;
+    })
+    .join('\n      ');
+
+  return `
+    <h3>Non-matching comments — ${items.length} ${pluralize(
+      items.length,
+      'comment',
+      'comments',
+    )}</h3>
+    <p style="margin:0 0 0.5em 0;font-size:13px">Comments on agreement posts that don't match the "I agree" regex. Click a name to open the comment on MN.</p>
+    <ul>
+      ${lis}
     </ul>`;
 }
 

@@ -107,6 +107,42 @@
         border-color: #7f1d1d;
         color: #fecaca;
       }
+      /* Stage 4f extension: per-anomaly Remove buttons sit inline next to
+         the member name in the "Added to Commons, now anomaly" lists.
+         They are visually smaller than tab-level action buttons and morph
+         through three stages: idle ("Remove from all Commons (dry run)"),
+         danger-confirm ("Confirm LIVE removal" — pulses to draw the eye),
+         and done ("Removed" — disabled). Operator clicks once to dry-run
+         against every Commons space, reviews the live log, then clicks
+         again to fire the real removal. */
+      .btn-remove-anomaly {
+        margin-left: 0.5rem;
+        font-size: 0.78rem;
+        padding: 0.2rem 0.55rem;
+        background: #28324a;
+        border-color: #3a4866;
+        color: #c8d4f0;
+        vertical-align: baseline;
+      }
+      .btn-remove-anomaly.danger-confirm {
+        background: #3f1d1d;
+        border-color: #7f1d1d;
+        color: #fecaca;
+        animation: anomaly-confirm-pulse 1.6s ease-in-out infinite;
+      }
+      .btn-remove-anomaly.done {
+        background: #1e3a2a;
+        border-color: #2f5a3a;
+        color: #b6e3c4;
+      }
+      @keyframes anomaly-confirm-pulse {
+        0%, 100% {
+          box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.55);
+        }
+        50% {
+          box-shadow: 0 0 0 4px rgba(248, 113, 113, 0);
+        }
+      }
       .dry-hint {
         color: var(--muted);
         font-size: 0.9rem;
@@ -508,6 +544,23 @@
           actionsRemove.hidden = running && section !== 'remove';
           actionsAdd.hidden = running && section !== 'add';
           actionsMembers.hidden = running && section !== 'members';
+          /* Stage 4f extension: per-anomaly Remove buttons are inert
+           * while any task is running. Buttons in the terminal 'done'
+           * stage stay disabled forever; everything else toggles with
+           * the running flag. The in-flight button's own click handler
+           * advances its stage after this setter has already disabled
+           * it, which is fine — the disabled flip is purely cosmetic
+           * while the fetch is in flight. */
+          document
+            .querySelectorAll('.btn-remove-anomaly')
+            .forEach(function (b) {
+              const stage = b.getAttribute('data-stage') || 'idle';
+              if (stage === 'done') {
+                b.disabled = true;
+                return;
+              }
+              b.disabled = running;
+            });
           syncTabRunningDots(section);
           syncAgreementsSectionControls();
         }
@@ -529,6 +582,42 @@
           btnAgreementsPoll.disabled = running || !agreementsImapPollAvailable;
           btnReconcileMembership.disabled = running || !agreementsStoreAvailable;
           btnAgreementsCopyJson.disabled = !lastAgreementsStatusJson;
+        }
+
+        /**
+         * Stage 4f extension: render the inline "Remove from all Commons"
+         * button that sits next to each Added-to-Commons-anomaly member.
+         *
+         * The button operates as a guarded two-step:
+         *   stage = "idle"        → label "Remove from all Commons (dry run)"
+         *                           click 1 dry-runs the all-spaces remove
+         *   stage = "dry-pending" → label "Dry run…" (disabled while task runs)
+         *   stage = "dry-done"    → label "Confirm LIVE removal" (pulses red)
+         *                           click 2 re-confirms via window.confirm
+         *                           and fires the LIVE all-spaces remove
+         *   stage = "live-pending"→ label "Removing…"  (disabled while task runs)
+         *   stage = "done"        → label "Removed" (disabled, green)
+         *
+         * Member identity travels in data-* attributes so the delegated
+         * click handler doesn't need a per-row closure. The button starts
+         * each render in "idle" — state is intentionally NOT persisted
+         * across dashboard refreshes / re-renders, since the underlying
+         * audit data may have moved on.
+         */
+        function anomalyRemoveButtonHtml(memberId, fullName) {
+          return (
+            '<button type="button" class="btn-remove-anomaly" ' +
+            'data-stage="idle" ' +
+            'data-member-id="' +
+            escapeHtml(String(memberId || '')) +
+            '" ' +
+            'data-member-name="' +
+            escapeHtml(String(fullName || '')) +
+            '" ' +
+            'title="Two-step removal: first click dry-runs the remove against every Commons space (no changes); second click fires the live removal.">' +
+            'Remove from all Commons (dry run)' +
+            '</button>'
+          );
         }
 
         /** Build inner HTML string (everything escaped manually). */
@@ -745,7 +834,9 @@
                 escapeHtml(String(row.memberId)) +
                 ' • ' +
                 (anomaliesLabel || '(no anomaly details)') +
-                '</span></li>'
+                '</span>' +
+                anomalyRemoveButtonHtml(row.memberId, row.fullName) +
+                '</li>'
               );
             }) +
             '</ul>';
@@ -1064,7 +1155,7 @@
              * audit job populates `commentUrl` on every AnomalyEntry,
              * so the dashboard just trusts it. */
             html += '<h4 style="margin:0.75rem 0 0.25rem">Added to Commons, now anomaly, need to DM</h4>';
-            html += '<p style="margin:0 0 0.5em 0;font-size:13px;opacity:0.85">Verified-added members whose current agreement state regressed since the previous audit. Click a name to open the member\u2019s most-recent comment \u2014 MN\u2019s comment view lets you jump to their profile / DM from there.</p>';
+            html += '<p style="margin:0 0 0.5em 0;font-size:13px;opacity:0.85">Verified-added members whose current agreement state regressed since the previous audit. Click a name to open the member\u2019s most-recent comment \u2014 MN\u2019s comment view lets you jump to their profile / DM from there. Use the inline <em>Remove from all Commons</em> button for a guarded two-step (dry-run first, then confirm) to evict the member from every Commons space.</p>';
             html += '<ul>';
             addedWithAnomaly.forEach(function (a) {
               const commentUrl = escapeHtml(String(a.commentUrl || a.articleUrl || ''));
@@ -1080,7 +1171,9 @@
                 '<li><a href="' + commentUrl + '" target="_blank" rel="noopener"><strong>' +
                 memberName + '</strong></a> — ' + state +
                 ' on <a href="' + articleUrl + '" target="_blank" rel="noopener">' +
-                articleTitle + '</a>' + sample + '</li>';
+                articleTitle + '</a>' + sample +
+                ' ' + anomalyRemoveButtonHtml(a.memberId, a.fullName) +
+                '</li>';
             });
             html += '</ul>';
           }
@@ -1153,6 +1246,105 @@
         btnAbortAdd.addEventListener('click', sendAbort);
         btnAbortMembers.addEventListener('click', sendAbort);
 
+        /* Stage 4f extension: delegated click handler for per-anomaly
+         * Remove buttons. These buttons live inside dynamically-
+         * generated HTML (the agreements dashboard + audit-result
+         * panel), so event delegation on the document body avoids
+         * having to re-bind every time those panels re-render.
+         *
+         * Two-step UX:
+         *   1) idle      → click 1 fires DRY RUN against ALL Commons
+         *                  spaces, button morphs to "Confirm LIVE
+         *                  removal" on success.
+         *   2) dry-done  → click 2 (after a strong confirm() prompt)
+         *                  fires LIVE removal; button morphs to
+         *                  "Removed" on success.
+         *
+         * Failure at either step rewinds the button to the previous
+         * stage so the operator can retry. The actual remove logs
+         * stream into the WebSocket log panel just like every other
+         * task on this page. */
+        document.body.addEventListener('click', async function (ev) {
+          const btn = ev.target && ev.target.closest
+            ? ev.target.closest('.btn-remove-anomaly')
+            : null;
+          if (!btn || btn.disabled) return;
+          if (runningSection !== null) return;
+
+          const memberId = btn.getAttribute('data-member-id') || '';
+          const memberName = btn.getAttribute('data-member-name') || '';
+          if (!memberId || !memberName) {
+            appendLog('ERROR: anomaly Remove button missing member id/name — refusing to fire.');
+            return;
+          }
+          const stage = btn.getAttribute('data-stage') || 'idle';
+          const headless = chkHeadless.checked;
+
+          if (stage === 'idle') {
+            btn.setAttribute('data-stage', 'dry-pending');
+            btn.textContent = 'Dry run…';
+            const outcome = await runTask('remove', '/run/remove-space-member-all-spaces', {
+              fullMemberName: memberName,
+              memberId: memberId,
+              headless: headless,
+              dryRun: true,
+            });
+            if (outcome && outcome.ok) {
+              btn.setAttribute('data-stage', 'dry-done');
+              btn.classList.add('danger-confirm');
+              btn.textContent = 'Confirm LIVE removal';
+              btn.title =
+                'Dry run succeeded. Click to fire the real removal across every Commons space ' +
+                '(you will be asked to confirm one more time).';
+            } else {
+              btn.setAttribute('data-stage', 'idle');
+              btn.textContent = 'Remove from all Commons (dry run)';
+            }
+            return;
+          }
+
+          if (stage === 'dry-done') {
+            const ok = window.confirm(
+              'LIVE remove "' + memberName + '"\n' +
+                '(member id ' + memberId + ')\n' +
+                'from EVERY Commons space?\n\n' +
+                'This is NOT a dry run. The dry run already logged what will happen — ' +
+                'check the activity log above before continuing.',
+            );
+            if (!ok) return;
+            btn.setAttribute('data-stage', 'live-pending');
+            btn.classList.remove('danger-confirm');
+            btn.textContent = 'Removing…';
+            const outcome = await runTask('remove', '/run/remove-space-member-all-spaces', {
+              fullMemberName: memberName,
+              memberId: memberId,
+              headless: headless,
+              dryRun: false,
+            });
+            if (outcome && outcome.ok) {
+              btn.setAttribute('data-stage', 'done');
+              btn.classList.add('done');
+              btn.disabled = true;
+              btn.textContent = 'Removed';
+              btn.title = 'Live removal request completed. Check the activity log for per-space results.';
+            } else {
+              btn.setAttribute('data-stage', 'dry-done');
+              btn.classList.add('danger-confirm');
+              btn.textContent = 'Confirm LIVE removal';
+            }
+            return;
+          }
+        });
+
+        /**
+         * Runs a long-running task by POSTing `payload` to `endpoint`
+         * while toggling the UI's running state for `section`.
+         *
+         * Returns a small status object so callers (e.g. the per-anomaly
+         * Remove buttons) can advance their own state machines on
+         * completion. Existing callers ignore the return value and
+         * remain unchanged.
+         */
         async function runTask(section, endpoint, payload) {
           clearResult();
           setTaskRunning(section);
@@ -1168,18 +1360,20 @@
             if (res.status === 409) {
               appendLog('ERROR: ' + (body.error || res.statusText));
               setTaskRunning(null);
-              return;
+              return { ok: false, status: res.status, body: body };
             }
             if (!res.ok) {
               appendLog('ERROR: ' + (body.error || res.statusText));
               setTaskRunning(null);
               showResult('<strong>HTTP ' + res.status + '</strong><pre>' + escapeHtml(JSON.stringify(body, null, 2)) + '</pre>', true);
-              return;
+              return { ok: false, status: res.status, body: body };
             }
             setTaskRunning(null);
+            return { ok: true, status: res.status, body: body };
           } catch (e) {
             appendLog('ERROR: ' + (e && e.message ? e.message : String(e)));
             setTaskRunning(null);
+            return { ok: false, error: e && e.message ? e.message : String(e) };
           }
         }
 

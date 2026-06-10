@@ -284,6 +284,37 @@ from the strict `^I agree.?$` matcher to the loose "I … agree" /
      deep link (or article URL fallback for 'deleted'). The
      audit-result panel surfaces both new lists with the same
      comment-anchor convention.
+
+3. **Per-anomaly "Remove from all Commons" button.** Sitting inline
+   next to each entry in the "Added to Commons, now anomaly, need
+   to DM" list (both the live dashboard and the audit-result panel)
+   is a guarded two-step button that calls the existing
+   `removeSpaceMember` task for every Commons space via the
+   `POST /run/remove-space-member-all-spaces` endpoint. The audit
+   email intentionally does NOT carry this button — emails can't
+   POST, and the entire flow depends on the live activity-log to
+   review the dry-run output before confirming.
+
+   - Stage transitions on the button:
+     1. `idle` → label "Remove from all Commons (dry run)". Click 1
+        sends `{ fullMemberName, memberId, headless: <chk>, dryRun: true }`
+        and streams per-space dry-run logs into the activity panel.
+     2. On dry-run success the button morphs to a pulsing red
+        "Confirm LIVE removal" (stage `dry-done`). Click 2 surfaces
+        a `confirm()` dialog naming the member, then sends the same
+        payload with `dryRun: false`.
+     3. On live-removal success the button locks to a green
+        "Removed" (stage `done`, disabled). Failures rewind the
+        stage so the operator can retry.
+   - Every per-anomaly button is disabled while ANY task is running
+     (the existing `setTaskRunning()` flow toggles them along with
+     the section-level action buttons). Buttons are intentionally
+     not persisted across dashboard refreshes — the underlying
+     audit data is the source of truth.
+   - `public/index.html` only — no server, store, or audit-job
+     changes were needed for this extension; the all-spaces remove
+     endpoint already exists and is wired through the same
+     exclusive browser scheduler.
 - Tests:
   - `test/changeOfHeartAuditJob.test.ts` — new fixtures cover the
     promotion (single-comment loose-matcher case), latest-wins

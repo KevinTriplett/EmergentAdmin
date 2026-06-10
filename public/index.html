@@ -548,12 +548,22 @@
               ? d.eligibleMembers
               : [];
           const progRows = Array.isArray(d.inProgressMembers) ? d.inProgressMembers : [];
+          /* Stage 4f extension: members already added to commons whose
+           * current audit state is anomalous (deleted/edited/mixed).
+           * Gracefully degrades to an empty list on older servers. */
+          const addedAnomalyRows = Array.isArray(d.addedWithAnomalyMembers)
+            ? d.addedWithAnomalyMembers
+            : [];
           const eligNotYetCount =
             typeof d.eligibleNotYetAddedCount === 'number'
               ? d.eligibleNotYetAddedCount
               : typeof d.eligibleCount === 'number'
                 ? d.eligibleCount
                 : 0;
+          const addedAnomalyCount =
+            typeof d.addedWithAnomalyMemberCount === 'number'
+              ? d.addedWithAnomalyMemberCount
+              : addedAnomalyRows.length;
           const eligTrunc = eligNotYetCount > eligRows.length;
           const progTrunc =
             typeof d.inProgressMemberCount === 'number' &&
@@ -681,6 +691,65 @@
               escapeHtml(String(d.inProgressMemberCount)) +
               '.</p>';
 
+          /* Stage 4f extension: "Added to Commons, now anomaly, need to
+           * DM" — verified-added members whose agreement state has
+           * since degraded. The member name anchors to the member's
+           * originally-recorded comment on MN; the operator lands on
+           * the comment, then one more click on the author's
+           * name/avatar opens their profile (with DM button). For
+           * 'deleted' state the original comment no longer exists, so
+           * we fall back to the article URL. Each per-article anomaly
+           * label is independently anchored too so the operator can
+           * jump straight to that article's evidence when a member
+           * has anomalies on more than one agreement post. */
+          function commentDeepLink(articleId, commentId, auditState) {
+            var articleUrl =
+              'https://emergent-commons.mn.co/posts/' +
+              encodeURIComponent(String(articleId || ''));
+            if (auditState === 'deleted' || !commentId) return articleUrl;
+            return articleUrl + '/comments/' + encodeURIComponent(String(commentId));
+          }
+
+          let addedAnomalyUl =
+            '<ul class="agreements-dash-list">' +
+            memberRows(addedAnomalyRows, function (row) {
+              var anomaliesArr = Array.isArray(row.anomalies) ? row.anomalies : [];
+              /* Pick the first anomaly (alphabetical by articleId per
+               * the SQL ORDER BY) as the anchor target for the member
+               * name. Multi-article anomalies still get one link per
+               * row in the label below. */
+              var primary = anomaliesArr[0] || null;
+              var primaryUrl = primary
+                ? commentDeepLink(primary.articleId, primary.commentId, primary.auditState)
+                : 'https://emergent-commons.mn.co';
+              var anomaliesLabel = anomaliesArr
+                .map(function (a) {
+                  var href = commentDeepLink(a.articleId, a.commentId, a.auditState);
+                  return (
+                    '<a href="' +
+                    escapeHtml(href) +
+                    '" target="_blank" rel="noopener">' +
+                    escapeHtml(String(a.auditState || '?')) +
+                    ' on <code>' +
+                    escapeHtml(String(a.articleId || '?')) +
+                    '</code></a>'
+                  );
+                })
+                .join(', ');
+              return (
+                '<li><a href="' +
+                escapeHtml(primaryUrl) +
+                '" target="_blank" rel="noopener">' +
+                escapeHtml(String(row.fullName)) +
+                '</a> <span style="opacity:0.8">• id ' +
+                escapeHtml(String(row.memberId)) +
+                ' • ' +
+                (anomaliesLabel || '(no anomaly details)') +
+                '</span></li>'
+              );
+            }) +
+            '</ul>';
+
           return (
             '<h3>Agreement database</h3>' +
             '<dl class="stat-grid">' +
@@ -702,6 +771,9 @@
             '<dt>In progress (started, below threshold)</dt><dd>' +
             escapeHtml(String(d.inProgressMemberCount ?? 0)) +
             '</dd>' +
+            '<dt>Added to Commons with current anomaly (DM queue)</dt><dd>' +
+            escapeHtml(String(addedAnomalyCount)) +
+            '</dd>' +
             '</dl>' +
             '<p class="agreements-dash-note">Snapshot time (browser): <code>' +
             escapeHtml(new Date().toISOString()) +
@@ -713,6 +785,8 @@
             imapHtml +
             '<h3>Eligible, not yet added to Commons</h3>' +
             eligUl +
+            '<h3>Added to Commons, now anomaly, need to DM</h3>' +
+            addedAnomalyUl +
             '<h3>In progress toward threshold</h3>' +
             progUl
           );
@@ -951,18 +1025,49 @@
          */
         function renderAuditResultHtml(body, totalAnomalies, nonMatching) {
           const anomalies = Array.isArray(body.anomalies) ? body.anomalies : [];
+          /* Stage 4f extension: pull the two new lists out with the same
+           * defensive Array.isArray guards as the others so older
+           * server builds (pre-extension) still render the legacy
+           * panel without throwing. */
+          const newlyEligible = Array.isArray(body.newlyEligibleMembers)
+            ? body.newlyEligibleMembers
+            : [];
+          const addedWithAnomaly = Array.isArray(body.addedWithAnomalies)
+            ? body.addedWithAnomalies
+            : [];
           let html =
             '<strong>Audit complete — ' + escapeHtml(String(totalAnomalies)) +
             ' anomaly(ies), ' + escapeHtml(String(nonMatching.length)) +
-            ' non-matching comment(s)</strong>';
+            ' non-matching comment(s)';
+          if (newlyEligible.length > 0) {
+            html += ', ' + escapeHtml(String(newlyEligible.length)) + ' newly eligible';
+          }
+          if (addedWithAnomaly.length > 0) {
+            html += ', ' + escapeHtml(String(addedWithAnomaly.length)) + ' added-to-commons need DM';
+          }
+          html += '</strong>';
 
-          if (anomalies.length === 0 && nonMatching.length === 0) {
+          if (
+            anomalies.length === 0 &&
+            nonMatching.length === 0 &&
+            newlyEligible.length === 0 &&
+            addedWithAnomaly.length === 0
+          ) {
             html += '<p>All clear. Every agreement comment matches the agree regex and no recorded member has changed their mind.</p>';
           }
 
-          if (anomalies.length > 0) {
-            html += '<h4 style="margin:0.75rem 0 0.25rem">Change-of-heart anomalies</h4><ul>';
-            anomalies.forEach(function (a) {
+          if (addedWithAnomaly.length > 0) {
+            /* Surfaced first because this is the operator-actionable DM
+             * queue. Each member name anchors to their most-recent
+             * comment on the article (or the article URL for the
+             * 'deleted' state, where no current comment exists) — the
+             * audit job populates `commentUrl` on every AnomalyEntry,
+             * so the dashboard just trusts it. */
+            html += '<h4 style="margin:0.75rem 0 0.25rem">Added to Commons, now anomaly, need to DM</h4>';
+            html += '<p style="margin:0 0 0.5em 0;font-size:13px;opacity:0.85">Verified-added members whose current agreement state regressed since the previous audit. Click a name to open the member\u2019s most-recent comment \u2014 MN\u2019s comment view lets you jump to their profile / DM from there.</p>';
+            html += '<ul>';
+            addedWithAnomaly.forEach(function (a) {
+              const commentUrl = escapeHtml(String(a.commentUrl || a.articleUrl || ''));
               const memberName = escapeHtml(String(a.fullName || '(unknown)'));
               const state = escapeHtml(String(a.state || ''));
               const articleTitle = escapeHtml(String(a.articleTitle || ''));
@@ -972,7 +1077,45 @@
                   ? ' — <em>' + escapeHtml(String(a.sampleNonMatchingText[0])) + '</em>'
                   : '';
               html +=
-                '<li><strong>' + memberName + '</strong> — ' + state +
+                '<li><a href="' + commentUrl + '" target="_blank" rel="noopener"><strong>' +
+                memberName + '</strong></a> — ' + state +
+                ' on <a href="' + articleUrl + '" target="_blank" rel="noopener">' +
+                articleTitle + '</a>' + sample + '</li>';
+            });
+            html += '</ul>';
+          }
+
+          if (newlyEligible.length > 0) {
+            html += '<h4 style="margin:0.75rem 0 0.25rem">Newly eligible</h4>';
+            html += '<p style="margin:0 0 0.5em 0;font-size:13px;opacity:0.85">Commenters the audit promoted to eligible because their most recent comment matches the loose agreement matcher. Already recorded; will appear under "Eligible, not yet added to Commons" on the next dashboard refresh. Click a name to open the promotion comment on MN.</p>';
+            html += '<ul>';
+            newlyEligible.forEach(function (e) {
+              const memberName = escapeHtml(String(e.fullName || '(unknown commenter)'));
+              const articleTitle = escapeHtml(String(e.articleTitle || ''));
+              const commentUrl = escapeHtml(String(e.commentUrl || ''));
+              html +=
+                '<li><a href="' + commentUrl + '" target="_blank" rel="noopener"><strong>' +
+                memberName + '</strong></a> — promoted from a matching comment on ' +
+                articleTitle + '</li>';
+            });
+            html += '</ul>';
+          }
+
+          if (anomalies.length > 0) {
+            html += '<h4 style="margin:0.75rem 0 0.25rem">Change-of-heart anomalies</h4><ul>';
+            anomalies.forEach(function (a) {
+              const commentUrl = escapeHtml(String(a.commentUrl || a.articleUrl || ''));
+              const memberName = escapeHtml(String(a.fullName || '(unknown)'));
+              const state = escapeHtml(String(a.state || ''));
+              const articleTitle = escapeHtml(String(a.articleTitle || ''));
+              const articleUrl = escapeHtml(String(a.articleUrl || ''));
+              const sample =
+                Array.isArray(a.sampleNonMatchingText) && a.sampleNonMatchingText.length > 0
+                  ? ' — <em>' + escapeHtml(String(a.sampleNonMatchingText[0])) + '</em>'
+                  : '';
+              html +=
+                '<li><a href="' + commentUrl + '" target="_blank" rel="noopener"><strong>' +
+                memberName + '</strong></a> — ' + state +
                 ' on <a href="' + articleUrl + '" target="_blank" rel="noopener">' +
                 articleTitle + '</a>' + sample + '</li>';
             });

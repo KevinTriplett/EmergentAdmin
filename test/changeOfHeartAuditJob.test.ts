@@ -469,12 +469,15 @@ describe('buildChangeOfHeartAuditJob', () => {
 
   describe('htmlBody (admin email)', () => {
     /**
-     * The chat-with-member URL pattern is fixed by Mighty Networks:
-     *   https://emergent-commons.mn.co/chats/new?user_id={memberId}
-     * Wrapping each anomalous member's name in this anchor lets the admin
-     * one-click DM the person from the email.
+     * Anomaly anchors point at the member's MOST-RECENT current comment
+     * on the article (MN's per-comment deep link), or the article URL
+     * itself when no current comment exists (the 'deleted' state). The
+     * operator lands directly on the evidence; from there MN's comment
+     * view exposes the author's profile / DM in one more click.
+     * Replaces the legacy `chats/new?user_id=` pattern, which dropped
+     * the operator into a blank DM screen with no context.
      */
-    it('wraps each anomalous member name in an anchor pointing at the chats/new URL', async () => {
+    it('anchors each anomalous member name to their most-recent comment on the article', async () => {
       store.recordAgreement({
         memberId: '17557698',
         fullName: 'Alice Adams',
@@ -502,14 +505,19 @@ describe('buildChangeOfHeartAuditJob', () => {
       const result = await job.run(makeCtx());
       const html = job.htmlBody!(result);
 
+      /* Bob's current comment is c-bob (state='edited') → anchor to
+       * that comment's deep link. */
       expect(html).toContain(
-        '<a href="https://emergent-commons.mn.co/chats/new?user_id=17557698">Alice Adams</a>',
+        `<a href="https://emergent-commons.mn.co/posts/${ART_A.articleId}/comments/c-bob">Bob Brown</a>`,
       );
-      expect(html).toContain(
-        '<a href="https://emergent-commons.mn.co/chats/new?user_id=17557699">Bob Brown</a>',
-      );
+      /* Alice has no current comment (state='deleted') → fall back to
+       * the article URL since the original comment is gone. */
+      expect(html).toContain(`<a href="${ART_A.url}">Alice Adams</a>`);
       expect(html).toContain('deleted');
       expect(html).toContain('edited');
+      /* And no chats/new URL anywhere — that's the legacy pattern we
+       * replaced. */
+      expect(html).not.toContain('chats/new');
     });
 
     it('renders an "all clear" fragment when there are zero anomalies', async () => {
@@ -548,15 +556,17 @@ describe('buildChangeOfHeartAuditJob', () => {
       expect(html).toContain('Mallory &lt;script&gt;alert(1)&lt;/script&gt;');
     });
 
-    it('encodes member ids inside the anchor href as URL components', async () => {
-      /* member_id is a numeric string in production, but the contract is
-       * "the value of the user_id query parameter", so the anchor must
-       * URI-encode it the same way the browser would. */
+    it('falls back to the article URL when the anomalous member has no current comment', async () => {
+      /* Pure 'deleted' regression: member is in the store but has no
+       * comments on the page. The anchor can't deep-link to a comment
+       * that doesn't exist, so it lands on the article instead — still
+       * actionable (the admin can scroll the comments for context),
+       * never broken (no 404 from a stale comment id). */
       store.recordAgreement({
-        memberId: 'weird id&x',
+        memberId: 'm-edge',
         fullName: 'Edge Case',
         articleId: ART_A.articleId,
-        commentId: 'c1',
+        commentId: 'c-original-gone',
         commentedAt: 1,
         source: 'email',
       });
@@ -568,7 +578,8 @@ describe('buildChangeOfHeartAuditJob', () => {
       const result = await job.run(makeCtx());
       const html = job.htmlBody!(result);
 
-      expect(html).toContain('user_id=weird%20id%26x');
+      expect(result.anomalies[0]?.commentUrl).toBe(ART_A.url);
+      expect(html).toContain(`<a href="${ART_A.url}">Edge Case</a>`);
     });
 
     it('links each anomaly back to the article it was found on', async () => {
@@ -858,10 +869,303 @@ describe('buildChangeOfHeartAuditJob', () => {
       const result = await job.run(makeCtx());
       const html = job.htmlBody!(result);
 
-      /* Anomaly side: Alice via chats/new (change of heart). */
-      expect(html).toContain('chats/new?user_id=');
-      /* Stage 4f side: Carol via comment deep link. */
+      /* Anomaly side: Alice's anchor lands on her most-recent current
+       * comment (c-alice). */
+      expect(html).toContain('/posts/art-A/comments/c-alice');
+      /* Stage 4f side: Carol via the non-matching forensic list link. */
       expect(html).toContain('/posts/art-A/comments/c-carol');
+      /* Sanity: no remaining chats/new URLs anywhere. */
+      expect(html).not.toContain('chats/new');
+    });
+
+    /* -----------------------------------------------------------------
+     * Stage 4f extension — newly-eligible promotion + added-to-commons
+     * anomaly queue.
+     *
+     * The audit now does two extra things on top of classifying members
+     * who already have an `agreements` row:
+     *
+     *   1. For every commenter on the page who does NOT have an
+     *      agreements row for the article, look at their most recent
+     *      comment (by `commentId`, which MN issues monotonically). If
+     *      it matches the loose agreement matcher, the audit records
+     *      an agreement on their behalf — so the "i also agree!" case
+     *      the strict regex used to ignore stops being invisible.
+     *      Tracked in `newlyEligibleMembers` / `totalNewlyEligibleMembers`.
+     *
+     *   2. From the change-of-heart anomalies, filter out the ones whose
+     *      member is already `commons_added_at IS NOT NULL` — those are
+     *      the "Added to Commons, now anomaly, need to DM" queue and
+     *      drive a new email + dashboard section.
+     *
+     * These tests pin behaviour through the orchestrator with a real
+     * in-memory store so the recordAgreement / recordAuditOutcome calls
+     * are exercised end-to-end.
+     * --------------------------------------------------------------- */
+    it('promotes a non-store commenter whose latest comment matches the agreement matcher', async () => {
+      /* Carol has never appeared in the store. Her one comment is the
+       * loose-matcher case ("i also agree!") the strict era ignored.
+       * After the audit she should have an agreement row recorded,
+       * and the result should surface her as newlyEligible. */
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, 'i also agree!', 'c-late'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      expect(result.totalNewlyEligibleMembers).toBe(1);
+      expect(result.newlyEligibleMembers).toHaveLength(1);
+      const ne = result.newlyEligibleMembers[0]!;
+      expect(ne.memberId).toBe(MEMBERS.carol.memberId);
+      expect(ne.articleId).toBe(ART_A.articleId);
+      expect(ne.commentId).toBe('c-late');
+      /* The audit must actually record the agreement, not just report
+       * it — otherwise the dashboard won't pick her up. */
+      expect(store.countAgreements(MEMBERS.carol.memberId)).toBe(1);
+      expect(store.getAuditState(MEMBERS.carol.memberId, ART_A.articleId)).toBe('happy');
+      /* Promoted commenter is NOT in the non-matching forensic list
+       * since their comment matches. */
+      expect(result.totalNonMatchingComments).toBe(0);
+    });
+
+    it('does NOT promote a commenter whose latest comment is a non-agreement (even if an older one matched)', async () => {
+      /* Per the operator's note: "the date of their comment ...
+       * indicates if they should be added if they first disagreed and
+       * now are agreeing." The converse is also true — if they
+       * earlier agreed but later changed their mind, don't promote.
+       * Sort key is commentId; '900' < '1000', so the disagreement
+       * is the more recent comment. */
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, 'I agree', '900'),
+          comment(MEMBERS.carol, 'I do not agree any more', '1000'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      expect(result.totalNewlyEligibleMembers).toBe(0);
+      expect(store.countAgreements(MEMBERS.carol.memberId)).toBe(0);
+      /* The non-matching comment is still surfaced in the forensic
+       * list because its text fails the matcher. */
+      expect(result.totalNonMatchingComments).toBeGreaterThanOrEqual(1);
+    });
+
+    it('promotes a commenter who first disagreed and then agreed (latest-comment-wins by commentId)', async () => {
+      /* Mirror image of the previous test: '900' is the old
+       * disagreement, '1000' is the new agreement. The audit
+       * should treat them as currently agreeing. */
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, 'I disagree, sorry', '900'),
+          comment(MEMBERS.carol, 'I agree.', '1000'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      expect(result.totalNewlyEligibleMembers).toBe(1);
+      expect(store.countAgreements(MEMBERS.carol.memberId)).toBe(1);
+      expect(result.newlyEligibleMembers[0]!.commentId).toBe('1000');
+    });
+
+    it('does NOT promote a commenter whose latest (and only) comment is a non-agreement', async () => {
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, 'hi everyone, just lurking', 'c-1'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      expect(result.totalNewlyEligibleMembers).toBe(0);
+      expect(store.countAgreements(MEMBERS.carol.memberId)).toBe(0);
+    });
+
+    it('does NOT re-promote a member who already has a row (existing-member path classifies them instead)', async () => {
+      /* Once a member is in the store the audit's pre-existing
+       * classification path owns them — they go through
+       * classifyMemberOnArticle and don't fall into the
+       * newly-eligible promotion loop. */
+      store.recordAgreement({
+        memberId: MEMBERS.alice.memberId,
+        fullName: MEMBERS.alice.fullName,
+        articleId: ART_A.articleId,
+        commentId: 'c-old',
+        commentedAt: 1,
+        source: 'email',
+      });
+
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.alice, 'I agree', 'c-new'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      expect(result.totalNewlyEligibleMembers).toBe(0);
+      /* And classified as happy via the regular path. */
+      expect(store.getAuditState(MEMBERS.alice.memberId, ART_A.articleId)).toBe('happy');
+    });
+
+    it('newly-promoted member becomes eligible-not-yet-added in the overview', async () => {
+      /* End-to-end: after the audit promotes Carol, the dashboard's
+       * "Eligible, not yet added to Commons" panel should see her. */
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, 'I agree.', 'c-1'),
+        ],
+      });
+
+      await job.run(makeCtx());
+
+      const overview = store.getAgreementsOverview();
+      const memberIds = overview.eligibleNotYetAddedMembers.map((m) => m.memberId);
+      expect(memberIds).toContain(MEMBERS.carol.memberId);
+    });
+
+    it('aggregates newly-eligible members across articles', async () => {
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A, ART_B],
+        loadAndScrapeArticleComments: async (_p, articleId) => {
+          if (articleId === ART_A.articleId) {
+            return [comment(MEMBERS.alice, 'I agree!', 'a-1')];
+          }
+          return [comment(MEMBERS.bob, 'i also agree!', 'b-1')];
+        },
+      });
+
+      const result = await job.run(makeCtx());
+
+      expect(result.totalNewlyEligibleMembers).toBe(2);
+      const ids = result.newlyEligibleMembers.map((e) => e.memberId).sort();
+      expect(ids).toEqual([MEMBERS.alice.memberId, MEMBERS.bob.memberId].sort());
+    });
+
+    it('addedWithAnomalies surfaces anomalies whose member is already verified-added to commons', async () => {
+      /* Alice agreed earlier, got added to all commons (commons_added_at
+       * is set), then changed her mind — her current state is
+       * 'edited'. She should appear in the DM queue. Bob is also
+       * anomalous but was NEVER verified-added, so he stays out of
+       * this queue (he's still in `anomalies`). */
+      store.recordAgreement({
+        memberId: MEMBERS.alice.memberId,
+        fullName: MEMBERS.alice.fullName,
+        articleId: ART_A.articleId,
+        commentId: 'c-alice-old',
+        commentedAt: 1,
+        source: 'email',
+      });
+      store.markCommonsAdded(MEMBERS.alice.memberId);
+      store.recordAgreement({
+        memberId: MEMBERS.bob.memberId,
+        fullName: MEMBERS.bob.fullName,
+        articleId: ART_A.articleId,
+        commentId: 'c-bob-old',
+        commentedAt: 1,
+        source: 'email',
+      });
+      /* Bob is in the store but NOT verified-added. */
+
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.alice, 'I do not agree', 'c-alice-new'),
+          comment(MEMBERS.bob, 'I disagree', 'c-bob-new'),
+        ],
+      });
+
+      const result = await job.run(makeCtx());
+
+      expect(result.totalAnomalies).toBe(2);
+      expect(result.totalAddedWithAnomalies).toBe(1);
+      expect(result.addedWithAnomalies[0]!.memberId).toBe(MEMBERS.alice.memberId);
+      expect(result.addedWithAnomalies[0]!.state).toBe('edited');
+    });
+
+    it('summarize() appends a newly-eligible tail when members were promoted', async () => {
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.carol, 'i also agree!', 'c-1'),
+        ],
+      });
+      const result = await job.run(makeCtx());
+      const summary = job.summarize(result);
+      expect(summary).toContain('(+1 newly eligible member)');
+    });
+
+    it('summarize() appends an added-to-commons-DM tail when there are anomalies on verified-added members', async () => {
+      store.recordAgreement({
+        memberId: MEMBERS.alice.memberId,
+        fullName: MEMBERS.alice.fullName,
+        articleId: ART_A.articleId,
+        commentId: 'c-old',
+        commentedAt: 1,
+        source: 'email',
+      });
+      store.markCommonsAdded(MEMBERS.alice.memberId);
+
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          comment(MEMBERS.alice, 'I disagree now', 'c-new'),
+        ],
+      });
+      const result = await job.run(makeCtx());
+      const summary = job.summarize(result);
+      expect(summary).toMatch(/\(1 added-to-commons member needs? DM\)/);
+    });
+
+    it('htmlBody renders the "Added to Commons, now anomaly, need to DM" section anchored to the member\'s latest comment', async () => {
+      store.recordAgreement({
+        memberId: 'm-alice-id',
+        fullName: 'Alice Adams',
+        articleId: ART_A.articleId,
+        commentId: 'c-old',
+        commentedAt: 1,
+        source: 'email',
+      });
+      store.markCommonsAdded('m-alice-id');
+
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          { commentId: 'c-new', memberId: 'm-alice-id', fullName: 'Alice Adams', text: 'I disagree' },
+        ],
+      });
+      const result = await job.run(makeCtx());
+      const html = job.htmlBody!(result);
+
+      expect(html).toMatch(/Added to Commons, now anomaly, need to DM/);
+      /* Alice's anchor → her current (and only) comment on the
+       * article, which is the evidence the operator needs to read
+       * before opening the DM. */
+      expect(html).toContain(`/posts/${ART_A.articleId}/comments/c-new`);
+      expect(html).not.toContain('chats/new');
+    });
+
+    it('htmlBody renders a "Newly eligible" section linking to the promotion comment', async () => {
+      const job = buildChangeOfHeartAuditJob(store, {
+        articles: [ART_A],
+        loadAndScrapeArticleComments: async () => [
+          { commentId: 'c-promo', memberId: MEMBERS.carol.memberId, fullName: MEMBERS.carol.fullName, text: 'I agree!' },
+        ],
+      });
+      const result = await job.run(makeCtx());
+      const html = job.htmlBody!(result);
+
+      expect(html).toMatch(/Newly eligible/);
+      expect(html).toContain('/posts/art-A/comments/c-promo');
     });
 
     it('escapes HTML in non-matching comment text and member names', async () => {

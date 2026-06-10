@@ -643,6 +643,147 @@ describe('agreementsStore', () => {
 
   });
 
+  /*
+   * Stage 4f extension — the "Added to Commons, now anomaly, need to DM"
+   * queue. A member belongs to the queue iff:
+   *
+   *   1. `members.commons_added_at IS NOT NULL` (verified-added).
+   *   2. At least one of their `agreements` rows has audit_state IN
+   *      ('deleted','edited','mixed').
+   *
+   * The dashboard surfaces this list as the operator's DM follow-up
+   * queue. These tests pin: (a) the filter excludes verified-added
+   * members who are happy, (b) the filter excludes anomalous members
+   * who were never verified-added (they go through other channels —
+   * still flagged in the audit's `anomalies` array, just not in this
+   * DM queue), (c) per-member rollup groups multi-article anomalies,
+   * and (d) the overview counters / list agree with the store method.
+   */
+  describe('Stage 4f added-to-commons anomaly queue', () => {
+    it('omits verified-added members whose audit_state is happy or NULL', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1'));
+        tiny.markCommonsAdded('m1');
+        /* audit_state is NULL — counts as not-an-anomaly. */
+        expect(tiny.listAddedToCommonsAnomalies()).toEqual([]);
+
+        tiny.recordAuditOutcome('m1', 'a1', 'happy');
+        expect(tiny.listAddedToCommonsAnomalies()).toEqual([]);
+
+        tiny.recordAuditOutcome('m1', 'a1', 'multi_agreement');
+        expect(tiny.listAddedToCommonsAnomalies()).toEqual([]);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('includes verified-added members whose audit_state is deleted/edited/mixed', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1', { fullName: 'Alice' }));
+        tiny.markCommonsAdded('m1');
+
+        for (const state of ['deleted', 'edited', 'mixed'] as const) {
+          tiny.recordAuditOutcome('m1', 'a1', state);
+          const out = tiny.listAddedToCommonsAnomalies();
+          expect(out).toHaveLength(1);
+          expect(out[0]?.memberId).toBe('m1');
+          expect(out[0]?.fullName).toBe('Alice');
+          expect(out[0]?.anomalies[0]?.auditState).toBe(state);
+        }
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('excludes anomalous members who were never verified-added', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1'));
+        tiny.recordAuditOutcome('m1', 'a1', 'edited');
+        /* No markCommonsAdded — m1 is anomalous but not in the DM
+         * queue because they were never added to commons. The audit's
+         * top-level `anomalies` array still surfaces them, just not
+         * this filtered view. */
+        expect(tiny.listAddedToCommonsAnomalies()).toEqual([]);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('rolls up multi-article anomalies under a single member entry', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 2 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1', { fullName: 'Alice' }));
+        tiny.recordAgreement(agreement('m1', 'a2', { fullName: 'Alice' }));
+        tiny.markCommonsAdded('m1');
+        tiny.recordAuditOutcome('m1', 'a1', 'edited');
+        tiny.recordAuditOutcome('m1', 'a2', 'mixed');
+
+        const out = tiny.listAddedToCommonsAnomalies();
+        expect(out).toHaveLength(1);
+        expect(out[0]?.memberId).toBe('m1');
+        /* ORDER BY article_id ASC in the SQL means we get a1 before a2. */
+        expect(out[0]?.anomalies.map((a) => a.articleId)).toEqual(['a1', 'a2']);
+        expect(out[0]?.anomalies.map((a) => a.auditState)).toEqual(['edited', 'mixed']);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('orders members alphabetically by full name (case-insensitive)', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+      try {
+        for (const [id, name] of [
+          ['m1', 'Zeta'],
+          ['m2', 'alpha'],
+          ['m3', 'Beta'],
+        ] as const) {
+          tiny.recordAgreement(agreement(id, 'a1', { fullName: name }));
+          tiny.markCommonsAdded(id);
+          tiny.recordAuditOutcome(id, 'a1', 'edited');
+        }
+        const names = tiny.listAddedToCommonsAnomalies().map((m) => m.fullName);
+        expect(names).toEqual(['alpha', 'Beta', 'Zeta']);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('getAgreementsOverview surfaces addedWithAnomalyMemberCount + addedWithAnomalyMembers', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1', { fullName: 'Alice' }));
+        tiny.markCommonsAdded('m1');
+        tiny.recordAuditOutcome('m1', 'a1', 'edited');
+
+        /* Also add a happy verified-added member so we know the counter
+         * isn't conflating "verified-added" with "needs DM". */
+        tiny.recordAgreement(agreement('m2', 'a1', { fullName: 'Bob' }));
+        tiny.markCommonsAdded('m2');
+        tiny.recordAuditOutcome('m2', 'a1', 'happy');
+
+        const ov = tiny.getAgreementsOverview();
+        expect(ov.addedWithAnomalyMemberCount).toBe(1);
+        expect(ov.addedWithAnomalyMembers).toHaveLength(1);
+        expect(ov.addedWithAnomalyMembers[0]?.memberId).toBe('m1');
+        /* commonsAddedMemberCount still counts BOTH verified-added
+         * members (not just anomalous ones) — the two counters are
+         * independent. */
+        expect(ov.commonsAddedMemberCount).toBe(2);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('overview returns zero / empty list when no verified-added anomalies exist', () => {
+      const o = store.getAgreementsOverview();
+      expect(o.addedWithAnomalyMemberCount).toBe(0);
+      expect(o.addedWithAnomalyMembers).toEqual([]);
+    });
+  });
+
   describe('schema migration', () => {
     it('opening an existing DB file twice is idempotent and preserves data', () => {
       // Use a temp file path so we can re-open it.

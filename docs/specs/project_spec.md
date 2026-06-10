@@ -212,6 +212,92 @@ commenter's name/id, and a truncated text sample.
   empty-commentId fallback, truncation, dedupe respect,
   cross-article aggregation, summary tails, and HTML escaping.
 
+**Stage 4f extension (audit-driven eligibility + DM queue):**
+
+The audit now does two more things beyond classifying members who
+already have an `agreements` row. Both are direct outputs of moving
+from the strict `^I agree.?$` matcher to the loose "I … agree" /
+"Agreed" + negation veto in `src/config/agreements.ts`.
+
+1. **Audit-driven eligibility ("i also agree!" promotion).** For every
+   commenter on every agreement post who does NOT have an `agreements`
+   row for that article, the audit picks the most recent comment by
+   `commentId` (MN issues these monotonically) and tests it against
+   `isAgreementText`. If it matches, the audit calls
+   `recordAgreement(...)` with `source: 'reconciliation'` and a
+   `commented_at` of "now" (the scraper doesn't expose per-comment
+   timestamps), then `recordAuditOutcome(memberId, articleId, 'happy')`
+   so the row's verdict matches the just-read page state without
+   waiting for the next audit pass. The newly recorded row makes the
+   member visible in `listMembersEligibleNotYetCommonsAdded` and so
+   in the dashboard's "Eligible, not yet added to Commons" panel.
+
+   Latest-comment-wins is the rule the operator asked for: "the date
+   of their comment ... indicates if they should be added if they
+   first disagreed and now are agreeing." Empty / non-numeric
+   commentIds fall through to a lexicographic tiebreaker so the audit
+   stays deterministic even if MN ever stops issuing numeric ids.
+
+   - `src/tasks/changeOfHeartAuditJob.ts` — new `NewlyEligibleEntry`
+     type and `newlyEligibleMembers: NewlyEligibleEntry[]` field on
+     both per-article and aggregated results, plus
+     `totalNewlyEligibleMembers`. `summarize()` appends a
+     `(+N newly eligible member(s))` tail. `renderAuditHtml` adds a
+     `<h3>Newly eligible</h3>` section linking to each promotion
+     comment.
+
+2. **"Added to Commons, now anomaly, need to DM" queue.** From the
+   change-of-heart anomalies (state IN ('deleted','edited','mixed')),
+   the audit filters to members whose `members.commons_added_at IS
+   NOT NULL` — i.e. members already verified-added to every commons
+   space. These are the operator's DM follow-up queue. Member names
+   are wrapped in MN's per-comment deep link
+   (`/posts/{articleId}/comments/{commentId}`) so the email and
+   dashboard land the operator directly on the comment that drove
+   the anomaly verdict. From there one more click on the author's
+   name/avatar opens their profile (with DM button) on MN. For the
+   'deleted' state the comment no longer exists, so the anchor falls
+   back to the article URL.
+
+   - `src/state/agreementsStore.ts` — new `AddedWithAnomalyMember`
+     type, `listAddedToCommonsAnomalies()` method, and two new
+     overview fields: `addedWithAnomalyMemberCount` and
+     `addedWithAnomalyMembers`. The store query rolls up
+     multi-article anomalies under a single member entry so the
+     dashboard can render "Alice — edited on art-A, mixed on art-B"
+     without regrouping in the browser.
+   - `src/tasks/changeOfHeartAuditJob.ts` — new
+     `addedWithAnomalies: AnomalyEntry[]` field + counter on the
+     aggregated result, populated by filtering the audit's own
+     `anomalies` list through `store.isCommonsAdded(memberId)` (so
+     the result and the store agree on who's in the queue
+     immediately after the audit run). `summarize()` appends a
+     `(N added-to-commons member(s) need DM)` tail.
+     `renderAuditHtml` adds a `<h3>Added to Commons, now anomaly,
+     need to DM</h3>` section above the change-of-heart anomalies
+     so the actionable queue is what the operator sees first.
+   - `public/index.html` — dashboard gets a new "Added to Commons,
+     now anomaly, need to DM" section between "Eligible, not yet
+     added to Commons" and "In progress toward threshold", plus a
+     counter dt/dd in the stat grid. Each member name and each
+     per-article anomaly label is anchored to the relevant comment
+     deep link (or article URL fallback for 'deleted'). The
+     audit-result panel surfaces both new lists with the same
+     comment-anchor convention.
+- Tests:
+  - `test/changeOfHeartAuditJob.test.ts` — new fixtures cover the
+    promotion (single-comment loose-matcher case), latest-wins
+    ordering in both directions ("agreed then disagreed",
+    "disagreed then agreed"), no-promotion paths
+    (latest is non-agreement, member already has a row),
+    end-to-end overview integration, cross-article aggregation,
+    the added-to-commons anomaly filter, both summary tails, and
+    HTML rendering of both new sections.
+  - `test/agreementsStore.test.ts` — new "Stage 4f added-to-commons
+    anomaly queue" block covering exclude-happy, include-anomalous,
+    exclude-not-added, multi-article rollup, alphabetical ordering,
+    overview integration, and the zero-state shape.
+
 
 ## TODO
 - index.html after clicking an action button (Remove or Add) replace those action

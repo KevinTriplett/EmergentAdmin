@@ -98,6 +98,40 @@ export type AgreementProgressMember = {
   distinctAgreementArticles: number;
 };
 
+/**
+ * Stage 4f extension: a member who is already verified-added to commons
+ * (`members.commons_added_at IS NOT NULL`) AND has at least one
+ * `agreements` row whose `audit_state` is in ('deleted','edited','mixed').
+ * Drives the dashboard's "Added to Commons, now anomaly, need to DM"
+ * section — the operator's queue for follow-up DMs to members whose
+ * agreement status has degraded since they were added.
+ *
+ * Each member rolls up their per-article anomalies into the `anomalies`
+ * array so the dashboard can show "Alice — deleted on Community
+ * Agreements, edited on Privacy Pledge" without the consumer having to
+ * regroup the flat join in the browser.
+ */
+export type AddedWithAnomalyMember = {
+  memberId: string;
+  fullName: string;
+  anomalies: ReadonlyArray<{
+    articleId: string;
+    auditState: Extract<AuditState, 'deleted' | 'edited' | 'mixed'>;
+    auditAt: number | null;
+    /**
+     * The `agreements.comment_id` of the originally-recorded agreement.
+     * For 'edited' and 'mixed' anomalies this id usually still exists
+     * on MN (MN preserves comment ids across edits), so the dashboard
+     * can build a deep-link to the comment for one-click triage. For
+     * 'deleted' anomalies the original comment was removed and this
+     * id will 404 — the dashboard falls back to the article URL in
+     * that case. Empty string is preserved verbatim for the same
+     * defensive reason.
+     */
+    commentId: string;
+  }>;
+};
+
 export type GetAgreementsOverviewOpts = {
   /** Max rows returned for eligible + in-progress lists (counts stay exact). Default 250. */
   maxListedMembers?: number;
@@ -124,10 +158,22 @@ export type AgreementsOverview = {
    */
   commonsAddedMemberCount: number;
   processedEmailCount: number;
+  /**
+   * Stage 4f extension: distinct member count whose `commons_added_at` is
+   * set AND who have at least one anomalous `agreements` row. Mirrors the
+   * shape of `eligibleNotYetAddedCount` — count stays exact even when the
+   * listed members array is truncated.
+   */
+  addedWithAnomalyMemberCount: number;
   eligibleMembers: readonly EligibleCommonsMember[];
   /** Stage 4f: same shape as eligibleMembers, filtered to flag-IS-NULL. */
   eligibleNotYetAddedMembers: readonly EligibleCommonsMember[];
   inProgressMembers: readonly AgreementProgressMember[];
+  /**
+   * Stage 4f extension: members already verified-added to commons whose
+   * current agreement state is anomalous. The "DM follow-up" queue.
+   */
+  addedWithAnomalyMembers: readonly AddedWithAnomalyMember[];
 };
 
 export interface AgreementsStore {
@@ -231,6 +277,16 @@ export interface AgreementsStore {
   recordAuditOutcome(memberId: string, articleId: string, state: AuditState, when?: number): void;
   /** Read back the last audit verdict for a (member, article); null when no row or never audited. */
   getAuditState(memberId: string, articleId: string): AuditState | null;
+  /**
+   * Stage 4f extension: members where `commons_added_at IS NOT NULL` AND
+   * at least one `agreements` row has audit_state in
+   * ('deleted','edited','mixed'). Used by the dashboard's "Added to
+   * Commons, now anomaly, need to DM" section. Each member's
+   * per-article anomalies are rolled up into the `anomalies` array so
+   * the consumer doesn't need to regroup a flat join. Ordered by
+   * full_name (case-insensitive) for stable UI.
+   */
+  listAddedToCommonsAnomalies(): readonly AddedWithAnomalyMember[];
 
   close(): void;
 }
@@ -505,6 +561,33 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
     selectAuditState: db.prepare<[string, string], { audit_state: AuditState | null }>(
       `SELECT audit_state FROM agreements WHERE member_id = ? AND article_id = ?`,
     ),
+    /* Stage 4f extension: per-(member, article) flat join for the
+     * "Added to Commons, now anomaly" list. Rolled up by member in
+     * application code so a member with anomalies on two articles
+     * appears once in the output with both articles in their
+     * `anomalies` array. */
+    listAddedToCommonsAnomaliesStmt: db.prepare<[], {
+      member_id: string;
+      full_name: string;
+      article_id: string;
+      comment_id: string;
+      audit_state: 'deleted' | 'edited' | 'mixed';
+      audit_at: number | null;
+    }>(
+      `SELECT m.member_id, m.full_name, a.article_id, a.comment_id, a.audit_state, a.audit_at
+       FROM members m
+       INNER JOIN agreements a ON a.member_id = m.member_id
+       WHERE m.commons_added_at IS NOT NULL
+         AND a.audit_state IN ('deleted','edited','mixed')
+       ORDER BY m.full_name COLLATE NOCASE ASC, a.article_id ASC`,
+    ),
+    countAddedToCommonsAnomalyMembers: db.prepare<[], { n: number }>(
+      `SELECT COUNT(DISTINCT m.member_id) AS n
+       FROM members m
+       INNER JOIN agreements a ON a.member_id = m.member_id
+       WHERE m.commons_added_at IS NOT NULL
+         AND a.audit_state IN ('deleted','edited','mixed')`,
+    ),
     /* Stage 4g: attempt ledger statements. The 'present' upsert is allowed
      * to overwrite a 'failed' row (transition forward); the 'failed'
      * upsert WHERE-guards against an existing 'present' to make verified
@@ -689,6 +772,37 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
       if (!row) return null;
       return row.audit_state ?? null;
     },
+    listAddedToCommonsAnomalies() {
+      const rows = statements.listAddedToCommonsAnomaliesStmt.all();
+      /* Roll up the flat (member, article) join into one entry per
+       * member. The SQL ORDER BY guarantees the rows arrive grouped
+       * by member already, so a single pass with a Map is enough and
+       * preserves the alphabetical order for the UI. */
+      const byMember = new Map<string, {
+        memberId: string;
+        fullName: string;
+        anomalies: Array<{
+          articleId: string;
+          auditState: Extract<AuditState, 'deleted' | 'edited' | 'mixed'>;
+          auditAt: number | null;
+          commentId: string;
+        }>;
+      }>();
+      for (const r of rows) {
+        let entry = byMember.get(r.member_id);
+        if (!entry) {
+          entry = { memberId: r.member_id, fullName: r.full_name, anomalies: [] };
+          byMember.set(r.member_id, entry);
+        }
+        entry.anomalies.push({
+          articleId: r.article_id,
+          auditState: r.audit_state,
+          auditAt: r.audit_at,
+          commentId: r.comment_id,
+        });
+      }
+      return Array.from(byMember.values());
+    },
     getAgreementsOverview(opts?: GetAgreementsOverviewOpts) {
       const maxListedMembers = opts?.maxListedMembers ?? 250;
 
@@ -732,6 +846,15 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
         distinctAgreementArticles: r.distinct_n,
       }));
 
+      const addedWithAnomalyMemberCount =
+        (statements.countAddedToCommonsAnomalyMembers.get() as { n: number }).n;
+      /* The full anomaly list is bounded by the verified-added population
+       * (small in practice) and the rows are already grouped by member —
+       * no need for the eligible-list truncation pattern here. If the
+       * roster ever balloons we can add a LIMIT, but the dashboard slice
+       * benefits from showing the full DM queue. */
+      const addedWithAnomalyMembers = this.listAddedToCommonsAnomalies();
+
       return {
         requiredAgreementCount,
         distinctMembersWithAgreement,
@@ -740,10 +863,12 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
         eligibleNotYetAddedCount,
         inProgressMemberCount,
         commonsAddedMemberCount,
+        addedWithAnomalyMemberCount,
         processedEmailCount,
         eligibleMembers,
         eligibleNotYetAddedMembers,
         inProgressMembers,
+        addedWithAnomalyMembers,
       };
     },
     close() {

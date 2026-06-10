@@ -19,17 +19,6 @@ import { isAgreementText as matchesAgreementPattern } from '../config/agreements
 import { escapeHtml } from '../email.js';
 
 /**
- * Mighty Networks "start a new chat with this user" URL pattern. The link is
- * what makes the admin email actionable — one click and the admin is in a DM
- * with the member whose agreement just disappeared / changed.
- */
-const CHAT_WITH_MEMBER_URL_BASE = 'https://emergent-commons.mn.co/chats/new';
-
-function chatWithMemberUrl(memberId: string): string {
-  return `${CHAT_WITH_MEMBER_URL_BASE}?user_id=${encodeURIComponent(memberId)}`;
-}
-
-/**
  * Stage 4e — change-of-heart audit job.
  *
  * For each agreement article in the configured list, navigate to the public
@@ -89,6 +78,21 @@ export type AnomalyEntry = {
    * compact.
    */
   sampleNonMatchingText: string[];
+  /**
+   * Deep link to one of the member's comments on the article — the
+   * operator-facing primary anchor for this anomaly. Lands on the
+   * comment's view on MN, from which the admin can click through to
+   * the member's profile + DM in one more click. We pick the member's
+   * MOST RECENT current comment (by `commentId`, which MN issues
+   * monotonically) so the link reflects the freshest evidence.
+   *
+   * Falls back to `articleUrl` for the 'deleted' state (no current
+   * comment exists to link to) or when the latest comment has an
+   * empty commentId (defensive — MN's DOM has always provided
+   * `data-detail-comment`, but a future redesign that drops it
+   * shouldn't break the link).
+   */
+  commentUrl: string;
 };
 
 /**
@@ -131,6 +135,35 @@ export type NonMatchingComment = {
 const SAMPLE_TEXT_MAX = 5;
 const SAMPLE_TEXT_TRUNCATE = 200;
 
+/**
+ * Stage 4f extension — a commenter the audit promoted to "eligible" by
+ * recording an agreement for the first time. Happens when their most
+ * recent comment on the article (by `commentId`, which MN issues
+ * monotonically) reads as an agreement under `isAgreementText` and they
+ * had no prior `agreements` row for this article. The row is written
+ * with `source: 'reconciliation'` (the schema doesn't carry an `audit`
+ * source value — reconciliation is the closest semantic match: the
+ * audit is reconciling the store with the live page) and a
+ * commented_at of "now", since the scraper doesn't expose per-comment
+ * timestamps.
+ *
+ * Once recorded, the member appears in
+ * `listMembersEligibleNotYetCommonsAdded` and so shows up in the
+ * dashboard's "Eligible, not yet added to Commons" panel on the next
+ * refresh — the operator's queue for the next add-to-all-spaces pass.
+ */
+export type NewlyEligibleEntry = {
+  memberId: string;
+  fullName: string;
+  articleId: string;
+  articleTitle: string;
+  articleUrl: string;
+  /** Comment id that drove the promotion (the most recent matching comment). */
+  commentId: string;
+  /** Deep link to that comment on the live MN post. */
+  commentUrl: string;
+};
+
 export type ChangeOfHeartArticleResult = {
   articleId: string;
   title: string;
@@ -142,6 +175,12 @@ export type ChangeOfHeartArticleResult = {
   anomalies: AnomalyEntry[];
   /** Stage 4f: every non-matching comment on this article, deduped. */
   nonMatchingComments: NonMatchingComment[];
+  /**
+   * Stage 4f extension: commenters the audit just promoted to eligible
+   * on this article (latest-comment-wins: their newest comment matches
+   * the agreement matcher AND they had no prior `agreements` row).
+   */
+  newlyEligibleMembers: NewlyEligibleEntry[];
 };
 
 export type ChangeOfHeartAuditResult = {
@@ -153,6 +192,17 @@ export type ChangeOfHeartAuditResult = {
   /** Stage 4f: every non-matching comment, aggregated across articles. */
   nonMatchingComments: NonMatchingComment[];
   totalNonMatchingComments: number;
+  /** Stage 4f extension: newly eligible members aggregated across articles. */
+  newlyEligibleMembers: NewlyEligibleEntry[];
+  totalNewlyEligibleMembers: number;
+  /**
+   * Stage 4f extension: subset of `anomalies` for members who were
+   * already verified-added to commons (`commons_added_at IS NOT NULL`).
+   * Drives the "Added to Commons, now anomaly, need to DM" section of
+   * the dashboard / audit email — these are the operators' DM queue.
+   */
+  addedWithAnomalies: AnomalyEntry[];
+  totalAddedWithAnomalies: number;
 };
 
 export type ChangeOfHeartAuditDeps = {
@@ -188,6 +238,7 @@ export function buildChangeOfHeartAuditJob(
       const articleResults: ChangeOfHeartArticleResult[] = [];
       const allAnomalies: AnomalyEntry[] = [];
       const allNonMatchingComments: NonMatchingComment[] = [];
+      const allNewlyEligibleMembers: NewlyEligibleEntry[] = [];
       let totalMembersAudited = 0;
 
       for (const article of articles) {
@@ -260,14 +311,16 @@ export function buildChangeOfHeartAuditJob(
                   .join(' / '),
             );
           } else {
+            const articleHref = article.url ?? postUrl(article.articleId);
             const entry: AnomalyEntry = {
               memberId: m.memberId,
               fullName: m.fullName,
               articleId: article.articleId,
               articleTitle: article.title,
-              articleUrl: article.url ?? postUrl(article.articleId),
+              articleUrl: articleHref,
               state,
               sampleNonMatchingText: sampleNonMatching(memberComments, state),
+              commentUrl: anomalyCommentUrl(memberComments, article.articleId, articleHref),
             };
             anomaliesForArticle.push(entry);
             ctx.log(
@@ -280,24 +333,93 @@ export function buildChangeOfHeartAuditJob(
           }
         }
 
+        /* Stage 4f extension: scan commenters who have NO prior
+         * agreements row for this article and promote any whose most
+         * recent comment matches the agreement matcher. This is what
+         * catches members the strict-regex era used to ignore
+         * (e.g. "i also agree!") as well as members who first
+         * disagreed and later agreed — `latestComment` honours the
+         * comment-id ordering the operator specified
+         * (commentIds are monotonic on MN). */
+        const existingMemberIds = new Set(members.map((m) => m.memberId));
+        const newlyEligibleForArticle: NewlyEligibleEntry[] = [];
+
+        for (const [memberId, memberComments] of byMember.entries()) {
+          if (!memberId) continue; // scraper drops these, but defensive
+          if (existingMemberIds.has(memberId)) continue;
+
+          const latest = latestComment(memberComments);
+          if (!latest) continue;
+          if (!textMatchesAgreement(latest.text)) continue;
+
+          /* Record the agreement so the member is now eligible. The
+           * upsert in `recordAgreement` writes audit_state=NULL which
+           * counts toward the threshold (see `AGREEMENT_VALID_WHERE`
+           * in agreementsStore). We immediately set audit_state='happy'
+           * so the row shows the correct verdict on the dashboard
+           * without waiting for the next audit pass. */
+          store.recordAgreement({
+            memberId,
+            fullName: latest.fullName,
+            articleId: article.articleId,
+            commentId: latest.commentId,
+            commentedAt: Date.now(),
+            source: 'reconciliation',
+          });
+          store.recordAuditOutcome(memberId, article.articleId, 'happy');
+          totalMembersAudited += 1;
+
+          const entry: NewlyEligibleEntry = {
+            memberId,
+            fullName: latest.fullName,
+            articleId: article.articleId,
+            articleTitle: article.title,
+            articleUrl: article.url ?? postUrl(article.articleId),
+            commentId: latest.commentId,
+            commentUrl: latest.commentId
+              ? commentUrl(article.articleId, latest.commentId)
+              : article.url ?? postUrl(article.articleId),
+          };
+          newlyEligibleForArticle.push(entry);
+          ctx.log(
+            `  • NEWLY_ELIGIBLE: ${latest.fullName} (id ${memberId}) — latest comment matches agreement; recorded.`,
+          );
+        }
+
         articleResults.push({
           articleId: article.articleId,
           title: article.title,
           url: article.url ?? postUrl(article.articleId),
           commentsLoaded: scraped.length,
-          membersAudited: members.length,
+          membersAudited: members.length + newlyEligibleForArticle.length,
           happyCount,
           multiAgreementCount,
           anomalies: anomaliesForArticle,
           nonMatchingComments: nonMatchingForArticle,
+          newlyEligibleMembers: newlyEligibleForArticle,
         });
         allAnomalies.push(...anomaliesForArticle);
         allNonMatchingComments.push(...nonMatchingForArticle);
+        allNewlyEligibleMembers.push(...newlyEligibleForArticle);
 
         ctx.log(
-          `  audited ${members.length} member(s): ${happyCount} happy, ${multiAgreementCount} multi-agreement, ${anomaliesForArticle.length} anomaly(ies), ${nonMatchingForArticle.length} non-matching comment(s).`,
+          `  audited ${members.length} member(s)` +
+            (newlyEligibleForArticle.length > 0
+              ? ` (+${newlyEligibleForArticle.length} newly eligible)`
+              : '') +
+            `: ${happyCount} happy, ${multiAgreementCount} multi-agreement, ${anomaliesForArticle.length} anomaly(ies), ${nonMatchingForArticle.length} non-matching comment(s).`,
         );
       }
+
+      /* Stage 4f extension: build the "Added to Commons, now anomaly"
+       * list at audit completion. Pulling it from the freshly-written
+       * store (via `isCommonsAdded` per anomaly) keeps this in lock-step
+       * with `getAgreementsOverview`'s `addedWithAnomalyMembers` — the
+       * dashboard panel and the audit email will agree on who's in the
+       * DM queue right after a run. */
+      const allAddedWithAnomalies = allAnomalies.filter((a) =>
+        store.isCommonsAdded(a.memberId),
+      );
 
       return {
         articles: articleResults,
@@ -306,6 +428,10 @@ export function buildChangeOfHeartAuditJob(
         totalMembersAudited,
         nonMatchingComments: allNonMatchingComments,
         totalNonMatchingComments: allNonMatchingComments.length,
+        newlyEligibleMembers: allNewlyEligibleMembers,
+        totalNewlyEligibleMembers: allNewlyEligibleMembers.length,
+        addedWithAnomalies: allAddedWithAnomalies,
+        totalAddedWithAnomalies: allAddedWithAnomalies.length,
       };
     },
     summarize: (result: ChangeOfHeartAuditResult): string => {
@@ -316,15 +442,22 @@ export function buildChangeOfHeartAuditJob(
        * sees it regardless of whether anyone with an existing
        * agreement row downgraded. `nonMatchingTail` returns the empty
        * string when there are zero non-matching comments, keeping
-       * the legacy "all clear" message unchanged in the common case. */
+       * the legacy "all clear" message unchanged in the common case.
+       * Stage 4f extension adds two more tails: newly-eligible
+       * promotions and the added-to-commons DM queue. Both also
+       * collapse to empty in the common case. */
+      const tails =
+        nonMatchingTail(result) +
+        newlyEligibleTail(result) +
+        addedWithAnomalyTail(result);
       if (result.totalAnomalies === 0) {
-        return `0 anomalies — all clear (audited ${result.totalMembersAudited} member-article ${pairsLabel} across ${result.articles.length} ${articlesLabel})${nonMatchingTail(result)}`;
+        return `0 anomalies — all clear (audited ${result.totalMembersAudited} member-article ${pairsLabel} across ${result.articles.length} ${articlesLabel})${tails}`;
       }
       const items = result.anomalies
         .map((a) => `${a.fullName} (${a.state})`)
         .join(', ');
       const anomLabel = pluralize(result.totalAnomalies, 'anomaly', 'anomalies');
-      return `${result.totalAnomalies} ${anomLabel}: ${items}${nonMatchingTail(result)}`;
+      return `${result.totalAnomalies} ${anomLabel}: ${items}${tails}`;
     },
     htmlBody: renderAuditHtml,
   };
@@ -334,6 +467,18 @@ function nonMatchingTail(result: ChangeOfHeartAuditResult): string {
   if (result.totalNonMatchingComments === 0) return '';
   const label = pluralize(result.totalNonMatchingComments, 'comment', 'comments');
   return ` (+${result.totalNonMatchingComments} non-matching ${label})`;
+}
+
+function newlyEligibleTail(result: ChangeOfHeartAuditResult): string {
+  if (result.totalNewlyEligibleMembers === 0) return '';
+  const label = pluralize(result.totalNewlyEligibleMembers, 'member', 'members');
+  return ` (+${result.totalNewlyEligibleMembers} newly eligible ${label})`;
+}
+
+function addedWithAnomalyTail(result: ChangeOfHeartAuditResult): string {
+  if (result.totalAddedWithAnomalies === 0) return '';
+  const label = pluralize(result.totalAddedWithAnomalies, 'member', 'members');
+  return ` (${result.totalAddedWithAnomalies} added-to-commons ${label} need DM)`;
 }
 
 // ---------------------------------------------------------------------------
@@ -346,11 +491,23 @@ function nonMatchingTail(result: ChangeOfHeartAuditResult): string {
  * `formatHtmlBody`. We render only the audit-specific section here.
  *
  * The whole point of this render is the per-anomaly anchor:
- *   <a href="https://emergent-commons.mn.co/chats/new?user_id=…">Full Name</a>
- * which makes the admin email actionable — one click DMs the member.
+ *   <a href="https://emergent-commons.mn.co/posts/{articleId}/comments/{commentId}">Full Name</a>
+ * which lands the admin directly on the member's comment — from there
+ * one more click on the author's name/avatar opens their profile with
+ * a DM button. Comment-based anchors win over the legacy `chats/new?user_id=`
+ * pattern because the operator gets context (which comment triggered the
+ * anomaly) before the conversation; for the 'deleted' state we fall back
+ * to the article URL because the member's comment no longer exists.
  */
 function renderAuditHtml(result: ChangeOfHeartAuditResult): string {
   const nonMatchingSection = renderNonMatchingCommentsHtml(result.nonMatchingComments);
+  /* Stage 4f extension: two new sections — the newly-eligible roster
+   * (members the audit just promoted) and the "Added to Commons, now
+   * anomaly, need to DM" queue. Both collapse to empty strings when
+   * their respective lists are empty, so the legacy "all clear" body
+   * is unchanged in the common case. */
+  const newlyEligibleSection = renderNewlyEligibleHtml(result.newlyEligibleMembers);
+  const addedWithAnomalySection = renderAddedWithAnomalyHtml(result.addedWithAnomalies);
 
   if (result.totalAnomalies === 0) {
     const allClear = `
@@ -364,14 +521,14 @@ function renderAuditHtml(result: ChangeOfHeartAuditResult): string {
         'article',
         'articles',
       )}).</p>`;
-    return allClear + nonMatchingSection;
+    return allClear + newlyEligibleSection + addedWithAnomalySection + nonMatchingSection;
   }
 
   const items = result.anomalies
     .map((a) => {
-      const memberLink = `<a href="${escapeHtml(
-        chatWithMemberUrl(a.memberId),
-      )}">${escapeHtml(a.fullName)}</a>`;
+      const memberLink = `<a href="${escapeHtml(a.commentUrl)}">${escapeHtml(
+        a.fullName,
+      )}</a>`;
       const articleLink = `<a href="${escapeHtml(a.articleUrl)}">${escapeHtml(
         a.articleTitle,
       )}</a>`;
@@ -393,7 +550,79 @@ function renderAuditHtml(result: ChangeOfHeartAuditResult): string {
     )}</h3>
     <ul>
       ${items}
-    </ul>${nonMatchingSection}`;
+    </ul>${newlyEligibleSection}${addedWithAnomalySection}${nonMatchingSection}`;
+}
+
+/**
+ * Stage 4f extension: render the "Newly eligible" section. The member
+ * name anchors directly to the comment that drove the promotion so the
+ * admin lands on the comment with one click — from there it's one more
+ * click to the author's profile / DM. Returns empty when the list is
+ * empty so the surrounding template stays clean.
+ */
+function renderNewlyEligibleHtml(items: readonly NewlyEligibleEntry[]): string {
+  if (items.length === 0) return '';
+
+  const lis = items
+    .map((e) => {
+      const memberLink = `<a href="${escapeHtml(e.commentUrl)}">${escapeHtml(
+        e.fullName || '(unknown commenter)',
+      )}</a>`;
+      return `<li>${memberLink} — promoted from a matching comment on ${escapeHtml(
+        e.articleTitle,
+      )}</li>`;
+    })
+    .join('\n      ');
+
+  return `
+    <h3>Newly eligible — ${items.length} ${pluralize(items.length, 'member', 'members')}</h3>
+    <p style="margin:0 0 0.5em 0;font-size:13px">Commenters whose most recent comment matches the loose agreement matcher and who didn't have an agreement row before this audit. Already recorded; they'll appear in the dashboard's "Eligible, not yet added to Commons" panel on the next refresh.</p>
+    <ul>
+      ${lis}
+    </ul>`;
+}
+
+/**
+ * Stage 4f extension: render the "Added to Commons, now anomaly, need
+ * to DM" section. This is the subset of change-of-heart anomalies
+ * whose members are already verified-added to commons — the operator
+ * needs to reach out and find out why their stance changed. The
+ * member name anchors to the member's most-recent comment on the
+ * article (or the article URL for 'deleted'), which lands the operator
+ * directly on the evidence; from there the author's profile / DM is
+ * one more click on MN.
+ */
+function renderAddedWithAnomalyHtml(items: readonly AnomalyEntry[]): string {
+  if (items.length === 0) return '';
+
+  const lis = items
+    .map((a) => {
+      const memberLink = `<a href="${escapeHtml(a.commentUrl)}">${escapeHtml(
+        a.fullName,
+      )}</a>`;
+      const articleLink = `<a href="${escapeHtml(a.articleUrl)}">${escapeHtml(
+        a.articleTitle,
+      )}</a>`;
+      const sample =
+        a.sampleNonMatchingText.length > 0
+          ? ` — <em>${escapeHtml(a.sampleNonMatchingText[0]!)}</em>`
+          : '';
+      return `<li>${memberLink} — <strong>${escapeHtml(
+        a.state,
+      )}</strong> on ${articleLink}${sample}</li>`;
+    })
+    .join('\n      ');
+
+  return `
+    <h3>Added to Commons, now anomaly, need to DM — ${items.length} ${pluralize(
+      items.length,
+      'member',
+      'members',
+    )}</h3>
+    <p style="margin:0 0 0.5em 0;font-size:13px">These members were previously verified-added to every commons space but their current agreement stance is anomalous. Click a name to open the member's most-recent comment on the article — MN's comment view lets you jump to their profile / DM from there.</p>
+    <ul>
+      ${lis}
+    </ul>`;
 }
 
 /**
@@ -491,6 +720,66 @@ function sampleNonMatching(
 
 function textMatchesAgreement(text: string): boolean {
   return matchesAgreementPattern(text);
+}
+
+/**
+ * Pick the URL to surface as the anomaly's primary anchor. Prefers the
+ * member's most-recent current comment on this article so the operator
+ * lands directly on the comment that drove the anomaly verdict; falls
+ * back to the parent article URL when no current comment exists
+ * (the 'deleted' state — they posted then removed their comment) or
+ * when the scraper failed to capture a commentId (defensive — MN's
+ * DOM has always rendered `data-detail-comment`, but a future
+ * redesign without it shouldn't yield an unclickable list entry).
+ */
+function anomalyCommentUrl(
+  memberComments: readonly ScrapedComment[],
+  articleId: string,
+  articleUrl: string,
+): string {
+  const latest = latestComment(memberComments);
+  if (!latest || !latest.commentId) return articleUrl;
+  return commentUrl(articleId, latest.commentId);
+}
+
+/**
+ * Stage 4f extension: pick the most-recent comment from a member's
+ * comment list using MN's monotonic commentId as the sort key. The
+ * operator's note: "the date of their comment (you can also go by the
+ * comment id, since the id is monotonically increasing over time)
+ * indicates if they should be added if they first disagreed and now are
+ * agreeing." So we look at the largest commentId and treat its text as
+ * the member's current stance on the article.
+ *
+ * Empty / non-numeric commentIds fall through to a lexicographic
+ * fallback, which still gives a stable order — even if MN ever
+ * stops issuing numeric ids the audit won't crash, it just picks a
+ * deterministic "latest" per the string comparison.
+ */
+function latestComment(comments: readonly ScrapedComment[]): ScrapedComment | null {
+  if (comments.length === 0) return null;
+  let best = comments[0]!;
+  for (let i = 1; i < comments.length; i++) {
+    const c = comments[i]!;
+    if (compareCommentIdDesc(c, best) < 0) best = c;
+  }
+  return best;
+}
+
+/** Negative if `a` is more recent than `b`; positive if older; 0 if equal. */
+function compareCommentIdDesc(a: ScrapedComment, b: ScrapedComment): number {
+  const an = Number(a.commentId);
+  const bn = Number(b.commentId);
+  const aFinite = Number.isFinite(an);
+  const bFinite = Number.isFinite(bn);
+  if (aFinite && bFinite) {
+    if (an === bn) return 0;
+    return bn - an; // larger id = more recent → a wins (negative) when an > bn
+  }
+  /* One or both non-numeric: defer to lexicographic descending so the
+   * order is at least deterministic. */
+  if (a.commentId === b.commentId) return 0;
+  return a.commentId > b.commentId ? -1 : 1;
 }
 
 function truncate(s: string, max: number): string {

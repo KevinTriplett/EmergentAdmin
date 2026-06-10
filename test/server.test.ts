@@ -445,6 +445,222 @@ describe('createApp', () => {
     }
   });
 
+  /* ---------------------------------------------------------------
+   * Stage 4f extension — store rollback after a live all-spaces
+   * remove. The endpoint must call store.markCommonsRemoved() so the
+   * dashboard's "Added to Commons, now anomaly, need to DM" queue
+   * drops the member, AND must NOT mutate the store on dry runs or
+   * partial failures.
+   * --------------------------------------------------------------- */
+
+  it('clears commons_added_at and deletes member_space_attempts after a LIVE all-spaces remove ends with failureCount=0', async () => {
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    store.recordAgreement({
+      memberId: '12345',
+      fullName: 'Jane Doe',
+      articleId: 'a1',
+      commentId: 'c1',
+      commentedAt: 1,
+      source: 'email',
+    });
+    store.markCommonsAdded('12345');
+    store.recordSpacePresent('12345', 'Marketplace');
+    store.recordSpacePresent('12345', 'Creative Center');
+    expect(store.isCommonsAdded('12345')).toBe(true);
+    expect(store.listMemberSpaceAttempts('12345')).toHaveLength(2);
+
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    removeSpaceMembers.mockResolvedValue({ success: true, removed: 1 });
+
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+    });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-member-all-spaces').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
+        dryRun: false,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.failureCount).toBe(0);
+      expect(res.body.storeCleanup).toEqual({
+        commonsAddedCleared: true,
+        spaceAttemptsDeleted: 2,
+      });
+      expect(store.isCommonsAdded('12345')).toBe(false);
+      expect(store.listMemberSpaceAttempts('12345')).toEqual([]);
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  it('does NOT touch the store on a DRY RUN all-spaces remove', async () => {
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    store.recordAgreement({
+      memberId: '12345',
+      fullName: 'Jane Doe',
+      articleId: 'a1',
+      commentId: 'c1',
+      commentedAt: 1,
+      source: 'email',
+    });
+    store.markCommonsAdded('12345');
+    store.recordSpacePresent('12345', 'Marketplace');
+
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    removeSpaceMembers.mockResolvedValue({ success: true, removed: 1 });
+
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+    });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-member-all-spaces').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
+        dryRun: true,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.storeCleanup).toBeNull();
+      /* Store invariants survive: dry runs are inspection-only. */
+      expect(store.isCommonsAdded('12345')).toBe(true);
+      expect(store.listMemberSpaceAttempts('12345')).toHaveLength(1);
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  it('does NOT touch the store when ANY space failed (partial failure → DB stays consistent with reality)', async () => {
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    store.recordAgreement({
+      memberId: '12345',
+      fullName: 'Jane Doe',
+      articleId: 'a1',
+      commentId: 'c1',
+      commentedAt: 1,
+      source: 'email',
+    });
+    store.markCommonsAdded('12345');
+    store.recordSpacePresent('12345', 'Marketplace');
+
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    /* First space fails, rest succeed → failureCount > 0. */
+    removeSpaceMembers
+      .mockResolvedValueOnce({ success: false, removed: 0, error: 'Toast did not appear' })
+      .mockResolvedValue({ success: true, removed: 1 });
+
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+    });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-member-all-spaces').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
+        dryRun: false,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.failureCount).toBeGreaterThan(0);
+      expect(res.body.storeCleanup).toBeNull();
+      expect(store.isCommonsAdded('12345')).toBe(true);
+      expect(store.listMemberSpaceAttempts('12345')).toHaveLength(1);
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  it('treats NOT_IN_SPACE-skipped spaces as success for the store rollback decision', async () => {
+    const store = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+    store.recordAgreement({
+      memberId: '12345',
+      fullName: 'Jane Doe',
+      articleId: 'a1',
+      commentId: 'c1',
+      commentedAt: 1,
+      source: 'email',
+    });
+    store.markCommonsAdded('12345');
+
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    /* Every space reports NOT_IN_SPACE (success:true, removed:0).
+     * The member's MN-side end state is "absent from every space"
+     * even though zero were actually removed this run — so the
+     * store rollback should still fire. */
+    removeSpaceMembers.mockResolvedValue({
+      success: true,
+      removed: 0,
+      error: 'NOT_IN_SPACE',
+    });
+
+    const server = createApp({
+      launchBrowser,
+      removeSpaceMembers,
+      addSpaceMember,
+      agreementsStore: store,
+    });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-member-all-spaces').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
+        dryRun: false,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.failureCount).toBe(0);
+      expect(res.body.storeCleanup).toEqual({
+        commonsAddedCleared: true,
+        spaceAttemptsDeleted: 0,
+      });
+      expect(store.isCommonsAdded('12345')).toBe(false);
+    } finally {
+      await closeServer(server);
+      store.close();
+    }
+  });
+
+  it('returns null storeCleanup when no agreementsStore is wired (single-process / minimal deployments)', async () => {
+    const mockPage = buildMockPage();
+    newPage.mockResolvedValue(mockPage);
+    launchBrowser.mockResolvedValue({ newPage, close });
+    removeSpaceMembers.mockResolvedValue({ success: true, removed: 1 });
+
+    const server = createApp({ launchBrowser, removeSpaceMembers, addSpaceMember });
+    await listen(server);
+    try {
+      const res = await request(server).post('/run/remove-space-member-all-spaces').send({
+        fullMemberName: 'Jane Doe',
+        memberId: '12345',
+        dryRun: false,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.failureCount).toBe(0);
+      expect(res.body.storeCleanup).toBeNull();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   // -------------------------------------------------------------------------
   // POST /run/add-space-member (single space)
   // -------------------------------------------------------------------------

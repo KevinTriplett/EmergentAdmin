@@ -1327,6 +1327,23 @@
               btn.disabled = true;
               btn.textContent = 'Removed';
               btn.title = 'Live removal request completed. Check the activity log for per-space results.';
+              /* Stage 4f extension: after a successful live all-spaces
+               * remove the server clears the member's commons_added_at
+               * flag and deletes their member_space_attempts rows. Pull
+               * the fresh agreements snapshot so the dashboard's "Added
+               * to Commons, now anomaly, need to DM" section drops the
+               * member without forcing the operator to hit Refresh.
+               * Errors are swallowed — the activity log already shows
+               * the successful remove, and the next manual refresh
+               * will reconcile. */
+              try {
+                await refreshAgreementsStatus({ quiet: true });
+              } catch (refreshErr) {
+                appendLog(
+                  'WARN: agreements refresh after live remove failed (will retry on next refresh): ' +
+                    (refreshErr && refreshErr.message ? refreshErr.message : String(refreshErr)),
+                );
+              }
             } else {
               btn.setAttribute('data-stage', 'dry-done');
               btn.classList.add('danger-confirm');

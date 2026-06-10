@@ -499,12 +499,57 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
         const totalRemoved = results.reduce((sum, r) => sum + r.removed, 0);
         const skippedCount = results.filter((r) => r.skipped).length;
         const failureCount = results.filter((r) => !r.success).length;
-        return { totalRemoved, skippedCount, failureCount, spaces: results };
+
+        /* Stage 4f extension: when a LIVE all-spaces remove ends with
+         * every space in the desired "not-a-member" state (no
+         * failures; skipped NOT_IN_SPACE rows count as success since
+         * the intent — "this member should be in zero Commons
+         * spaces" — is still met), roll back the store invariants
+         * the add-job had established. Without this the dashboard's
+         * "Added to Commons, now anomaly, need to DM" queue would
+         * keep showing the member forever (the SQL filters on
+         * `commons_added_at IS NOT NULL`), and a future re-add would
+         * silently no-op because the Stage 4g per-space ledger
+         * still says "already present everywhere".
+         *
+         * Skipped on dry-run by design — a dry run must never mutate
+         * the store. Skipped on partial failure so the store reflects
+         * the operator's *actual* end state (some spaces still have
+         * the member). */
+        const store = deps.agreementsStore;
+        let storeCleanup: {
+          commonsAddedCleared: boolean;
+          spaceAttemptsDeleted: number;
+        } | null = null;
+        if (store && !dryRun.value && failureCount === 0) {
+          storeCleanup = store.markCommonsRemoved(memberId.value);
+          if (storeCleanup.commonsAddedCleared) {
+            ctx.log(
+              `\nStore: cleared commons_added_at for ${fullMemberName.value} (member id ${memberId.value}).`,
+            );
+          }
+          if (storeCleanup.spaceAttemptsDeleted > 0) {
+            ctx.log(
+              `Store: deleted ${storeCleanup.spaceAttemptsDeleted} member_space_attempts row(s) for ${fullMemberName.value}.`,
+            );
+          }
+          if (!storeCleanup.commonsAddedCleared && storeCleanup.spaceAttemptsDeleted === 0) {
+            ctx.log(`\nStore: no rollback needed (member had no commons_added_at flag or space-attempts).`);
+          }
+        }
+
+        return { totalRemoved, skippedCount, failureCount, spaces: results, storeCleanup };
       },
       summarize: (r) =>
         `${r.totalRemoved} removed across ${r.spaces.length} spaces` +
         (r.skippedCount ? `, ${r.skippedCount} not in space` : '') +
-        (r.failureCount ? `, ${r.failureCount} failed` : ''),
+        (r.failureCount ? `, ${r.failureCount} failed` : '') +
+        (r.storeCleanup && r.storeCleanup.commonsAddedCleared
+          ? `, store: commons_added_at cleared` +
+            (r.storeCleanup.spaceAttemptsDeleted > 0
+              ? ` (+${r.storeCleanup.spaceAttemptsDeleted} attempt rows)`
+              : '')
+          : ''),
     });
   });
 

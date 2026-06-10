@@ -217,6 +217,38 @@ export interface AgreementsStore {
   markCommonsAdded(memberId: string, when?: number): void;
   /** Stage 4f: read back whether the member has been verified-added. */
   isCommonsAdded(memberId: string): boolean;
+  /**
+   * Stage 4f extension — roll back every store invariant the
+   * add-to-all-spaces path established for this member, in a single
+   * transaction:
+   *   1. `members.commons_added_at` → NULL (drops them out of the
+   *      "Added to Commons, now anomaly, need to DM" queue and out
+   *      of `commonsAddedMemberCount` on the next overview read).
+   *   2. Every `member_space_attempts` row for the member is
+   *      deleted. Those rows are the Stage 4g consent gate — leaving
+   *      'present' rows behind after a deliberate live removal would
+   *      cause the next auto-add pass to skip every space (the
+   *      pre-loop skip interprets 'present' as "already there, do
+   *      not re-add"), silently turning a future re-add into a
+   *      no-op the operator can't explain.
+   *
+   * Designed to be called from `POST /run/remove-space-member-all-spaces`
+   * after a NON-dry-run that ended with `failureCount === 0` — i.e.
+   * every commons space ended in the desired "not-a-member" state
+   * (whether by an actual removal or because the member was already
+   * absent / NOT_IN_SPACE). On partial failure the caller is
+   * expected to leave the store alone so reality and the DB stay in
+   * agreement.
+   *
+   * Returns counters so the task log / activity panel can show
+   * exactly what was rolled back. Silently no-ops on unknown
+   * members; idempotent on repeat calls (a follow-up invocation
+   * with nothing left to clear returns `{false, 0}`).
+   */
+  markCommonsRemoved(memberId: string): {
+    commonsAddedCleared: boolean;
+    spaceAttemptsDeleted: number;
+  };
 
   // ---- Stage 4g: per-(member, space) attempt ledger ------------------------
   /**
@@ -456,6 +488,22 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
      * the timestamp. */
     markCommonsAdded: db.prepare<[number, string]>(
       `UPDATE members SET commons_added_at = ? WHERE member_id = ? AND commons_added_at IS NULL`,
+    ),
+    /* Stage 4f extension: roll-back companion to markCommonsAdded. The
+     * WHERE-guard against IS NOT NULL means `changes` reports 1 only
+     * when we actually flipped the flag from set → NULL, so the caller
+     * can tell "we cleared an in-effect verification" from "the row
+     * was already cleared / member never verified". */
+    clearCommonsAdded: db.prepare<[string]>(
+      `UPDATE members SET commons_added_at = NULL WHERE member_id = ? AND commons_added_at IS NOT NULL`,
+    ),
+    /* Stage 4f extension: drop the Stage 4g per-(member, space) ledger
+     * for a member. Wholesale delete (both 'present' and 'failed') —
+     * once the operator has removed the member from every commons
+     * space, the consent state for every (member, space) pair is
+     * effectively zero and any prior verdict is stale. */
+    deleteAllSpaceAttempts: db.prepare<[string]>(
+      `DELETE FROM member_space_attempts WHERE member_id = ?`,
     ),
     selectMemberCommonsAdded: db.prepare<[string], { commons_added_at: number | null }>(
       `SELECT commons_added_at FROM members WHERE member_id = ?`,
@@ -735,6 +783,20 @@ export function openAgreementsStore(opts: OpenStoreOptions): AgreementsStore {
         | { commons_added_at: number | null }
         | undefined;
       return Boolean(row && row.commons_added_at !== null);
+    },
+    markCommonsRemoved(memberId) {
+      /* Wrapped in a single transaction so the dashboard never sees
+       * an inconsistent state where commons_added_at is cleared but
+       * stale 'present' attempt rows remain (or vice-versa). */
+      const txn = db.transaction((id: string) => {
+        const updRes = statements.clearCommonsAdded.run(id);
+        const delRes = statements.deleteAllSpaceAttempts.run(id);
+        return {
+          commonsAddedCleared: updRes.changes > 0,
+          spaceAttemptsDeleted: delRes.changes,
+        };
+      });
+      return txn(memberId);
     },
     recordSpacePresent(memberId, spaceName, when = Date.now()) {
       statements.upsertSpacePresent.run(memberId, spaceName, when);

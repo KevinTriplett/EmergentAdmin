@@ -491,6 +491,129 @@ describe('agreementsStore', () => {
   });
 
   /*
+   * Stage 4f extension — `markCommonsRemoved`.
+   *
+   * Companion to `markCommonsAdded`, called by
+   * `POST /run/remove-space-member-all-spaces` after a non-dry-run
+   * live remove that ended with `failureCount === 0`. It must:
+   *   1. Set `members.commons_added_at` back to NULL.
+   *   2. Delete every `member_space_attempts` row for the member.
+   *   3. Both writes commit (or roll back) as a unit.
+   *   4. Drop the member out of the "Added to Commons, now anomaly,
+   *      need to DM" queue immediately.
+   *   5. No-op cleanly on unknown members and on members who have
+   *      nothing to roll back.
+   */
+  describe('Stage 4f markCommonsRemoved', () => {
+    it('clears commons_added_at and reports it was flipped from set → NULL', () => {
+      store.recordAgreement(agreement('m1', 'a1'));
+      store.markCommonsAdded('m1');
+      expect(store.isCommonsAdded('m1')).toBe(true);
+
+      const result = store.markCommonsRemoved('m1');
+      expect(result.commonsAddedCleared).toBe(true);
+      expect(store.isCommonsAdded('m1')).toBe(false);
+    });
+
+    it('deletes every member_space_attempts row for the member and reports the count', () => {
+      store.recordAgreement(agreement('m1', 'a1'));
+      store.recordSpacePresent('m1', 'Marketplace');
+      store.recordSpacePresent('m1', 'Creative Center');
+      store.recordSpaceFailed('m1', '8. Miscellaneous', 'something');
+      expect(store.listMemberSpaceAttempts('m1')).toHaveLength(3);
+
+      const result = store.markCommonsRemoved('m1');
+      expect(result.spaceAttemptsDeleted).toBe(3);
+      expect(store.listMemberSpaceAttempts('m1')).toEqual([]);
+    });
+
+    it('leaves OTHER members untouched (scoped to the requested member_id)', () => {
+      store.recordAgreement(agreement('m1', 'a1', { fullName: 'Alice' }));
+      store.recordAgreement(agreement('m2', 'a1', { fullName: 'Bob' }));
+      store.markCommonsAdded('m1');
+      store.markCommonsAdded('m2');
+      store.recordSpacePresent('m1', 'Marketplace');
+      store.recordSpacePresent('m2', 'Marketplace');
+
+      store.markCommonsRemoved('m1');
+
+      expect(store.isCommonsAdded('m1')).toBe(false);
+      expect(store.isCommonsAdded('m2')).toBe(true);
+      expect(store.listMemberSpaceAttempts('m1')).toEqual([]);
+      expect(store.listMemberSpaceAttempts('m2')).toHaveLength(1);
+    });
+
+    it('drops the member out of listAddedToCommonsAnomalies immediately', () => {
+      store.recordAgreement(agreement('m1', 'a1', { fullName: 'Alice' }));
+      store.markCommonsAdded('m1');
+      store.recordAuditOutcome('m1', 'a1', 'edited');
+      expect(store.listAddedToCommonsAnomalies()).toHaveLength(1);
+
+      store.markCommonsRemoved('m1');
+
+      expect(store.listAddedToCommonsAnomalies()).toEqual([]);
+    });
+
+    it('decrements overview.commonsAddedMemberCount once the flag is cleared', () => {
+      const tiny = openAgreementsStore({ filePath: ':memory:', requiredAgreementCount: 1 });
+      try {
+        tiny.recordAgreement(agreement('m1', 'a1'));
+        tiny.markCommonsAdded('m1');
+        expect(tiny.getAgreementsOverview().commonsAddedMemberCount).toBe(1);
+
+        tiny.markCommonsRemoved('m1');
+        expect(tiny.getAgreementsOverview().commonsAddedMemberCount).toBe(0);
+      } finally {
+        tiny.close();
+      }
+    });
+
+    it('returns {false, 0} when the member is unknown', () => {
+      const result = store.markCommonsRemoved('m-ghost');
+      expect(result).toEqual({ commonsAddedCleared: false, spaceAttemptsDeleted: 0 });
+    });
+
+    it('returns {false, 0} on a known member with nothing to roll back', () => {
+      store.recordAgreement(agreement('m1', 'a1'));
+      /* commons_added_at was never set, no space-attempts rows recorded. */
+      const result = store.markCommonsRemoved('m1');
+      expect(result).toEqual({ commonsAddedCleared: false, spaceAttemptsDeleted: 0 });
+    });
+
+    it('is idempotent — a second call is a clean no-op', () => {
+      store.recordAgreement(agreement('m1', 'a1'));
+      store.markCommonsAdded('m1');
+      store.recordSpacePresent('m1', 'Marketplace');
+
+      const first = store.markCommonsRemoved('m1');
+      expect(first.commonsAddedCleared).toBe(true);
+      expect(first.spaceAttemptsDeleted).toBe(1);
+
+      const second = store.markCommonsRemoved('m1');
+      expect(second).toEqual({ commonsAddedCleared: false, spaceAttemptsDeleted: 0 });
+    });
+
+    it('does NOT delete the agreements rows (audit_state survives — only the commons-added side is rolled back)', () => {
+      store.recordAgreement(agreement('m1', 'a1', { fullName: 'Alice' }));
+      store.markCommonsAdded('m1');
+      store.recordAuditOutcome('m1', 'a1', 'edited');
+
+      store.markCommonsRemoved('m1');
+
+      /* The member is still in the store with the agreement row and
+       * its anomaly state intact — markCommonsRemoved targets the
+       * commons-added side of the ledger only. countAgreements
+       * filters on AGREEMENT_VALID_WHERE so an 'edited' row reads
+       * as zero "valid" agreements, which is correct semantics for
+       * eligibility — but the underlying row still exists. We probe
+       * its survival via getAuditState (returns null only when the
+       * row is gone) and the member-name lookup. */
+      expect(store.getAuditState('m1', 'a1')).toBe('edited');
+      expect(store.getMemberFullName('m1')).toBe('Alice');
+    });
+  });
+
+  /*
    * Stage 4g — per-(member, space) attempt ledger.
    *
    * The ledger is the consent gate: once a row is `'present'` for

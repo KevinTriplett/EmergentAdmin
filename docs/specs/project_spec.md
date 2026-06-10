@@ -311,10 +311,60 @@ from the strict `^I agree.?$` matcher to the loose "I … agree" /
      the section-level action buttons). Buttons are intentionally
      not persisted across dashboard refreshes — the underlying
      audit data is the source of truth.
-   - `public/index.html` only — no server, store, or audit-job
-     changes were needed for this extension; the all-spaces remove
-     endpoint already exists and is wired through the same
-     exclusive browser scheduler.
+   - `public/index.html` carries the button + click handler. The
+     all-spaces remove endpoint (`POST /run/remove-space-member-all-spaces`)
+     gained a small store-rollback tail described in the next item;
+     the audit job itself is unchanged.
+
+4. **Store rollback on a live all-spaces remove.** Without this the
+   dashboard would never drop a member from the "Added to Commons,
+   now anomaly, need to DM" queue: the SQL filter joins on
+   `members.commons_added_at IS NOT NULL`, and the Stage 4g
+   `member_space_attempts` rows would also remain. So after the
+   per-space loop in `POST /run/remove-space-member-all-spaces`
+   completes, IFF (a) the call was NOT a dry run AND (b) every
+   space ended in success — actual removals + NOT_IN_SPACE skips
+   both count as success, since the operator's intent ("zero
+   commons spaces for this member") is met either way — the
+   endpoint calls a new `store.markCommonsRemoved(memberId)`.
+
+   - `src/state/agreementsStore.ts` — new `markCommonsRemoved`
+     method, transactional:
+     1. `UPDATE members SET commons_added_at = NULL WHERE
+        member_id = ? AND commons_added_at IS NOT NULL` (the
+        IS-NOT-NULL guard makes the returned `changes` count
+        unambiguously mean "actually flipped from set → NULL").
+     2. `DELETE FROM member_space_attempts WHERE member_id = ?`
+        (drops every per-space row, both 'present' and 'failed').
+     Returns `{ commonsAddedCleared, spaceAttemptsDeleted }` for
+     logging. No-ops on unknown members and idempotent on repeat
+     calls.
+   - `src/server.ts` — the all-spaces remove endpoint now bundles
+     the cleanup into its result body (`storeCleanup`), logs the
+     rollback into the activity panel, and appends a short tail to
+     `summarize()` so the email/log summary reads "X removed across
+     N spaces, store: commons_added_at cleared". Dry runs and
+     partial-failure runs leave the store alone (store stays in
+     sync with reality).
+   - `public/index.html` — after a successful LIVE removal the
+     per-anomaly button's click handler kicks off a quiet
+     `refreshAgreementsStatus({ quiet: true })` so the operator sees
+     the member drop off the DM queue immediately, without needing
+     to click "Refresh agreements".
+   - Tests:
+     - `test/agreementsStore.test.ts` — new "Stage 4f
+       markCommonsRemoved" block: clears the flag, deletes
+       attempt rows, leaves other members untouched, drops the
+       member from `listAddedToCommonsAnomalies`, decrements
+       `overview.commonsAddedMemberCount`, no-op return shape on
+       unknown / clean members, idempotent on second call, and a
+       guard that the `agreements` rows + `audit_state` survive
+       (we roll back the commons-added side only).
+     - `test/server.test.ts` — new endpoint-level tests:
+       full-success live remove → store rollback fires; dry run →
+       store untouched; partial failure → store untouched;
+       NOT_IN_SPACE-only run → rollback still fires (intent met);
+       store not wired → `storeCleanup: null`.
 - Tests:
   - `test/changeOfHeartAuditJob.test.ts` — new fixtures cover the
     promotion (single-comment loose-matcher case), latest-wins

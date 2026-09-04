@@ -19,7 +19,7 @@ import {
   activeMembersCsvPath,
   tokensMatch,
 } from './utils/activeMemberList.js';
-import { sendRunLogEmail as defaultSendRunLogEmail } from './email.js';
+import { sendDirectEmail, sendRunLogEmail as defaultSendRunLogEmail } from './email.js';
 import {
   createTaskScheduler,
   TaskConflictError,
@@ -44,6 +44,15 @@ import {
   type ChangeOfHeartAuditDeps,
 } from './tasks/changeOfHeartAuditJob.js';
 import cron from 'node-cron';
+import {
+  approveLead,
+  buildHarvestLeadsJob,
+  declineLead,
+  buildDeclineStaleLeadsJob,
+  GREETER_EMAILS,
+  openLeadsStore,
+  type LeadsStore,
+} from './tasks/leads.js';
 
 const publicDir = path.join(process.cwd(), 'public');
 const DEFAULT_USER_AGENT =
@@ -170,6 +179,8 @@ export type CreateAppDeps = {
    * `sendRunLogEmail` is used by default; it no-ops outside of production.
    */
   sendRunLogEmail?: typeof defaultSendRunLogEmail;
+  leadsStore?: LeadsStore;
+  sendLeadEmail?: (message: { from: string; to: string; subject: string; text: string }) => Promise<void>;
   /**
    * Optional agreements store. When provided, persists agreement state and
    * registers Stage 4c `POST /run/reconcile-commons-membership` + Stage 4d
@@ -781,6 +792,60 @@ export function createAppWithScheduler(deps: CreateAppDeps): CreateAppResult {
     });
   }
 
+  if (deps.leadsStore) {
+    const leads = deps.leadsStore;
+    app.get('/status/leads', (_req: Request, res: Response) => {
+      res.status(200).json({ leads: leads.list() });
+    });
+
+    app.post('/run/harvest-leads', async (req: Request, res: Response) => {
+      const headless = req.body?.headless !== false;
+      await runExclusiveBrowserTask(res, buildHarvestLeadsJob(leads, deps.sendLeadEmail, headless));
+    });
+
+    app.post('/run/leads/:email/approve', async (req: Request, res: Response) => {
+      const email = req.params.email;
+      await runExclusiveBrowserTask(res, {
+        name: 'approve-lead', headless: req.body?.headless !== false,
+        run: async ({ page, log }) => {
+          const result = await approveLead(page, email, log);
+          if (!result.success) throw new Error(result.error ?? 'Approve failed');
+          leads.updateStatus(email, 'Joined');
+          return result;
+        }, summarize: (result) => `${result.status}: ${result.email}`,
+      });
+    });
+
+    app.post('/run/leads/:email/decline', async (req: Request, res: Response) => {
+      const email = req.params.email;
+      await runExclusiveBrowserTask(res, {
+        name: 'decline-lead', headless: req.body?.headless !== false,
+        run: async ({ page, log }) => {
+          const result = await declineLead(page, email, log);
+          if (!result.success) throw new Error(result.error ?? 'Decline failed');
+          leads.updateStatus(email, 'Declined');
+          return result;
+        }, summarize: (result) => `${result.status}: ${result.email}`,
+      });
+    });
+
+    app.post('/run/leads/:email/email', async (req: Request, res: Response) => {
+      const email = req.params.email;
+      const lead = leads.getByEmail(email);
+      if (!lead) { res.status(404).json({ error: 'Lead not found' }); return; }
+      try {
+        await (deps.sendLeadEmail ?? (async (message) => sendDirectEmail({ ...message, to: [message.to] })))(
+          { from: 'kt@kevintriplett.com', to: lead.email, subject: 'Meet a greeter at Emergent Commons',
+            text: 'Hello,\n\nThank you for asking to join Emergent Commons.\n\nChoose a time that suits you using this link:\nhttps://calendly.com/kevintriplett/emergent-commons-welcome\n\nBest regards,\nKevin Triplett' },
+        );
+        const updated = leads.markEmailSent(email);
+        res.status(200).json(updated);
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+      }
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // WebSocket for live logs + abort signal
   // ---------------------------------------------------------------------------
@@ -844,6 +909,9 @@ if (isMainModule) {
   let imapPoller: ImapPoller | undefined;
   let reconcileCronTask: ReturnType<typeof cron.schedule> | undefined;
   let auditCronTask: ReturnType<typeof cron.schedule> | undefined;
+  let leadsHarvestCronTask: ReturnType<typeof cron.schedule> | undefined;
+  let leadsDeclineCronTask: ReturnType<typeof cron.schedule> | undefined;
+  const leadsStore = openLeadsStore(process.env.EC_ADMIN_DB_PATH ?? path.join(process.cwd(), 'data', 'ec-admin.db'));
 
   const agreementsImapScratch: {
     lastPollCompletedAt: string | null;
@@ -871,6 +939,8 @@ if (isMainModule) {
     addSpaceMember: defaultAddSpaceMember,
     collectActiveMemberList: defaultCollectActiveMemberList,
     agreementsStore,
+    leadsStore,
+    sendLeadEmail: async (message) => sendDirectEmail({ ...message, to: [message.to] }),
     agreementsImapPollOnce:
       agreementsEnabled && agreementsStore
         ? async () => {
@@ -944,10 +1014,26 @@ if (isMainModule) {
     }
   }
 
+  const leadsHarvestExpr = resolveCronExpr(process.env.LEADS_HARVEST_CRON, '0 4 * * *');
+  if (leadsHarvestExpr !== null) {
+    leadsHarvestCronTask = safeCronSchedule('leads-harvest', leadsHarvestExpr, () => {
+      void scheduler.enqueueBackground(buildHarvestLeadsJob(leadsStore, async (message) => sendDirectEmail({ ...message, to: GREETER_EMAILS }), true));
+    });
+  }
+  const leadsDeclineExpr = resolveCronExpr(process.env.LEADS_DECLINE_CRON, '0 5 * * 0');
+  if (leadsDeclineExpr !== null) {
+    leadsDeclineCronTask = safeCronSchedule('leads-decline-stale', leadsDeclineExpr, () => {
+      void scheduler.enqueueBackground(buildDeclineStaleLeadsJob(leadsStore, true));
+    });
+  }
+
   server.on('close', () => {
     imapPoller?.stop();
     reconcileCronTask?.stop();
     auditCronTask?.stop();
+    leadsHarvestCronTask?.stop();
+    leadsDeclineCronTask?.stop();
+    leadsStore.close();
   });
 
   server.listen(port, () => {

@@ -35,6 +35,14 @@ type SmtpConfig = {
   from: string;
 };
 
+export type DirectEmail = {
+  from: string;
+  to: readonly string[];
+  subject: string;
+  text: string;
+  html?: string;
+};
+
 /**
  * Read SMTP config from the environment. Returns null if any required field
  * is missing or the port isn't a number — both are "silently skip sending"
@@ -51,6 +59,25 @@ function readSmtpConfig(): SmtpConfig | null {
   const port = Number(portRaw);
   if (!Number.isFinite(port)) return null;
   return { host, port, user, pass, from };
+}
+
+export async function sendDirectEmail(message: DirectEmail): Promise<void> {
+  if (process.env.NODE_ENV !== 'production') return;
+  const smtp = readSmtpConfig();
+  if (!smtp || message.to.length === 0) return;
+  const transporter = nodemailer.createTransport({
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.port === 465,
+    auth: { user: smtp.user, pass: smtp.pass },
+  });
+  await transporter.sendMail({
+    from: message.from,
+    to: message.to.join(', '),
+    subject: message.subject,
+    text: message.text,
+    ...(message.html !== undefined ? { html: message.html } : {}),
+  });
 }
 
 function formatBody(payload: RunLogEmailPayload): string {

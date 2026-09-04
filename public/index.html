@@ -331,7 +331,16 @@
       <button id="tab-add" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-add" tabindex="-1">Add<span class="tab-running-dot" data-tab-running></span></button>
       <button id="tab-remove" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-remove" tabindex="-1">Remove<span class="tab-running-dot" data-tab-running></span></button>
       <button id="tab-members" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-members" tabindex="-1">Members<span class="tab-running-dot" data-tab-running></span></button>
+      <button id="tab-leads" type="button" class="tab" role="tab" aria-selected="false" aria-controls="panel-leads" tabindex="-1">Leads</button>
     </div>
+
+    <section id="panel-leads" class="tabpanel" role="tabpanel" aria-labelledby="tab-leads" tabindex="0" hidden>
+      <div class="actions">
+        <button type="button" class="primary" id="btn-leads-refresh">Refresh leads</button>
+        <button type="button" class="primary" id="btn-leads-harvest">Harvest new leads</button>
+      </div>
+      <div id="leads-dashboard" class="agreements-dashboard" aria-live="polite">Loading leads…</div>
+    </section>
 
     <section id="panel-agreements" class="tabpanel" role="tabpanel" aria-labelledby="tab-agreements" tabindex="0">
       <p class="agreements-intro">
@@ -1901,6 +1910,44 @@
           });
         }
 
+        const leadsDashboard = document.getElementById('leads-dashboard');
+        async function refreshLeads() {
+          const response = await fetch('/status/leads');
+          if (!response.ok) { leadsDashboard.textContent = 'Leads database unavailable.'; return; }
+          const data = await response.json();
+          const pending = data.leads.filter(function (lead) { return lead.status === 'Pending'; });
+          const disposition = data.leads.filter(function (lead) { return lead.status !== 'Pending'; });
+          function rowMarkup(lead, actions) {
+            var answers = (lead.answers || []).map(function (storedAnswer) {
+              var delimiter = '\n\n--- Answer ---\n';
+              var splitAt = storedAnswer.indexOf(delimiter);
+              var question = splitAt < 0 ? storedAnswer : storedAnswer.slice(0, splitAt);
+              var answer = splitAt < 0 ? '' : storedAnswer.slice(splitAt + delimiter.length);
+              return '<div><strong>Question:</strong> ' + escapeHtml(question) + '<br><strong>Answer:</strong> ' + escapeHtml(answer || '(no answer)') + '</div>';
+            }).join('');
+            return '<tr><td>' + escapeHtml(lead.name) + '</td><td>' + escapeHtml(lead.email) + '</td><td>' +
+              escapeHtml(lead.status) + '</td><td>' + escapeHtml(lead.dateRequested) + '</td><td>' +
+              (lead.emailSentAt ? escapeHtml(lead.emailSentAt.slice(0, 10)) : '-') + '</td><td>' + lead.emailCount + '</td><td>' + actions + '</td><td><details><summary>See answers</summary>' + answers + '</details></td></tr>';
+          }
+          let html = '<h3>Pending leads</h3><table><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Requested</th><th>Email sent</th><th>Emails</th><th>Actions</th><th>Answers</th></tr></thead><tbody>';
+          html += pending.map(function (lead) { return rowMarkup(lead, '<button data-lead-action="approve" data-email="' + escapeHtml(lead.email) + '">Approve</button> <button data-lead-action="decline" data-email="' + escapeHtml(lead.email) + '">Decline</button> <button data-lead-action="email" data-email="' + escapeHtml(lead.email) + '">Send email</button>'); }).join('');
+          html += '</tbody></table><h3>Disposition</h3><table><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Requested</th><th>Email sent</th><th>Emails</th><th>Actions</th><th>Answers</th></tr></thead><tbody>';
+          html += disposition.map(function (lead) { return rowMarkup(lead, ''); }).join('');
+          leadsDashboard.innerHTML = html + '</tbody></table>';
+        }
+        document.getElementById('btn-leads-refresh').addEventListener('click', function () { void refreshLeads(); });
+        document.getElementById('btn-leads-harvest').addEventListener('click', async function () {
+          await fetch('/run/harvest-leads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ headless: chkHeadless.checked }) });
+          void refreshLeads();
+        });
+        leadsDashboard.addEventListener('click', async function (event) {
+          const button = event.target.closest('[data-lead-action]');
+          if (!button || button.dataset.leadAction === 'answers') return;
+          const action = button.dataset.leadAction;
+          await fetch('/run/leads/' + encodeURIComponent(button.dataset.email) + '/' + (action === 'email' ? 'email' : action), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ headless: chkHeadless.checked }) });
+          void refreshLeads();
+        });
+        void refreshLeads();
         connectWs();
         syncAgreementsSectionControls();
         void refreshAgreementsStatus({ quiet: false });

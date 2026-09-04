@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   reconcileLeads,
   formatLeadAnswer,
+  extractLeadAnswers,
   parseLeadAnswer,
   shouldDeclineLead,
   type HarvestedLead,
@@ -20,6 +21,16 @@ function lead(overrides: Partial<HarvestedLead> = {}): HarvestedLead {
 }
 
 describe('leads', () => {
+  it('extracts only the current lead answer pairs', () => {
+    expect(extractLeadAnswers([
+      { question: 'Question one', answer: 'Answer one' },
+      { question: 'Question two', answer: 'Answer two' },
+    ])).toEqual([
+      'Question one\n\n--- Answer ---\nAnswer one',
+      'Question two\n\n--- Answer ---\nAnswer two',
+    ]);
+  });
+
   it('keeps each answer pair delimited and round-trippable', () => {
     const stored = formatLeadAnswer('What interests you?', 'Community and inquiry.');
     expect(stored).toBe('What interests you?\n\n--- Answer ---\nCommunity and inquiry.');

@@ -70,6 +70,12 @@ export function parseLeadAnswer(storedAnswer: string): { question: string; answe
   };
 }
 
+export function extractLeadAnswers(
+  items: readonly { question: string; answer: string }[],
+): string[] {
+  return items.map((item) => formatLeadAnswer(item.question, item.answer));
+}
+
 export function reconcileLeads(existing: readonly StoredLead[], harvested: readonly HarvestedLead[]): LeadReconciliation {
   const byEmail = new Map(existing.map((item) => [item.email.toLowerCase(), item]));
   const harvestedEmails = new Set<string>();
@@ -206,13 +212,17 @@ export async function harvestLeads({ page, log, maxLeads = MAX_LEADS, abortSigna
       return false;
     }, row.email);
     if (opened) {
-      await page.waitForSelector(SEL_ANSWERS_LIST, { timeout: 5_000 });
-      row.answers = await page.$$eval(`${SEL_ANSWERS_LIST} li`, (items) => items.map((item) => {
-        const question = item.children[0]?.textContent?.trim() ?? '';
-        const answer = item.children[1]?.textContent?.trim() ?? '';
-        return `${question}\n\n--- Answer ---\n${answer}`;
-      }));
-      await page.keyboard.press('Escape').catch(() => undefined);
+      const answerDialog = "[role='dialog'][aria-labelledby='view-answers-dialog-title']";
+      await page.waitForSelector(`${answerDialog} ${SEL_ANSWERS_LIST}`, { timeout: 5_000 });
+      const answerItems = await page.$eval(`${answerDialog} ${SEL_ANSWERS_LIST}`, (list) =>
+        Array.from(list.querySelectorAll(':scope > li')).map((item) => ({
+          question: item.children[0]?.textContent?.trim() ?? '',
+          answer: item.children[1]?.textContent?.trim() ?? '',
+        })),
+      );
+      row.answers = extractLeadAnswers(answerItems);
+      await page.click(`${answerDialog} button[aria-label='Close']`);
+      await page.waitForSelector(answerDialog, { hidden: true, timeout: 5_000 });
     }
   }
   return rows;

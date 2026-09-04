@@ -290,6 +290,63 @@
         margin-top: 0;
         border-top-left-radius: 0;
       }
+      .lead-answers-modal[hidden] {
+        display: none;
+      }
+      .lead-answers-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: grid;
+        place-items: center;
+        padding: 1rem;
+        background: rgba(0, 0, 0, 0.72);
+      }
+      .lead-answers-dialog {
+        width: min(60rem, 100%);
+        max-height: min(46rem, calc(100vh - 2rem));
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.45);
+      }
+      .lead-answers-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        padding: 1rem 1.25rem;
+        border-bottom: 1px solid var(--border);
+      }
+      .lead-answers-header h2 {
+        margin: 0;
+        font-size: 1.1rem;
+      }
+      .lead-answers-close {
+        flex: 0 0 auto;
+        padding: 0.25rem 0.6rem;
+      }
+      .lead-answers-body {
+        overflow-y: auto;
+        padding: 1rem 1.25rem;
+      }
+      .lead-answer-pair {
+        padding: 0 0 1rem;
+        margin: 0 0 1rem;
+        border-bottom: 1px solid var(--border);
+        overflow-wrap: anywhere;
+      }
+      .lead-answer-pair:last-child {
+        margin-bottom: 0;
+        border-bottom: 0;
+      }
+      .lead-answer-pair p {
+        margin: 0.25rem 0 0;
+        white-space: pre-wrap;
+      }
       .tab-running-dot {
         display: none;
         width: 0.55rem;
@@ -341,6 +398,15 @@
       </div>
       <div id="leads-dashboard" class="agreements-dashboard" aria-live="polite">Loading leads…</div>
     </section>
+    <div id="lead-answers-modal" class="lead-answers-modal" role="presentation" hidden>
+      <div class="lead-answers-dialog" role="dialog" aria-modal="true" aria-labelledby="lead-answers-title">
+        <div class="lead-answers-header">
+          <h2 id="lead-answers-title">Lead answers</h2>
+          <button type="button" class="lead-answers-close" id="btn-close-lead-answers" aria-label="Close answers">Close</button>
+        </div>
+        <div id="lead-answers-body" class="lead-answers-body"></div>
+      </div>
+    </div>
 
     <section id="panel-agreements" class="tabpanel" role="tabpanel" aria-labelledby="tab-agreements" tabindex="0">
       <p class="agreements-intro">
@@ -1911,6 +1977,12 @@
         }
 
         const leadsDashboard = document.getElementById('leads-dashboard');
+        const leadAnswersModal = document.getElementById('lead-answers-modal');
+        const leadAnswersTitle = document.getElementById('lead-answers-title');
+        const leadAnswersBody = document.getElementById('lead-answers-body');
+        const closeLeadAnswers = function () {
+          leadAnswersModal.hidden = true;
+        };
         async function refreshLeads() {
           const response = await fetch('/status/leads');
           if (!response.ok) { leadsDashboard.textContent = 'Leads database unavailable.'; return; }
@@ -1923,11 +1995,11 @@
               var splitAt = storedAnswer.indexOf(delimiter);
               var question = splitAt < 0 ? storedAnswer : storedAnswer.slice(0, splitAt);
               var answer = splitAt < 0 ? '' : storedAnswer.slice(splitAt + delimiter.length);
-              return '<div><strong>Question:</strong> ' + escapeHtml(question) + '<br><strong>Answer:</strong> ' + escapeHtml(answer || '(no answer)') + '</div>';
+              return '<article class="lead-answer-pair"><strong>Question</strong><p>' + escapeHtml(question) + '</p><strong>Answer</strong><p>' + escapeHtml(answer || '(no answer)') + '</p></article>';
             }).join('');
             return '<tr><td>' + escapeHtml(lead.name) + '</td><td>' + escapeHtml(lead.email) + '</td><td>' +
               escapeHtml(lead.status) + '</td><td>' + escapeHtml(lead.dateRequested) + '</td><td>' +
-              (lead.emailSentAt ? escapeHtml(lead.emailSentAt.slice(0, 10)) : '-') + '</td><td>' + lead.emailCount + '</td><td>' + actions + '</td><td><details><summary>See answers</summary>' + answers + '</details></td></tr>';
+              (lead.emailSentAt ? escapeHtml(lead.emailSentAt.slice(0, 10)) : '-') + '</td><td>' + lead.emailCount + '</td><td>' + actions + '</td><td><button type="button" data-lead-action="answers" data-email="' + escapeHtml(lead.email) + '" data-name="' + escapeHtml(lead.name) + '" data-answers="' + escapeHtml(answers) + '">See answers</button></td></tr>';
           }
           let html = '<h3>Pending leads</h3><table><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Requested</th><th>Email sent</th><th>Emails</th><th>Actions</th><th>Answers</th></tr></thead><tbody>';
           html += pending.map(function (lead) { return rowMarkup(lead, '<button data-lead-action="approve" data-email="' + escapeHtml(lead.email) + '">Approve</button> <button data-lead-action="decline" data-email="' + escapeHtml(lead.email) + '">Decline</button> <button data-lead-action="email" data-email="' + escapeHtml(lead.email) + '">Send email</button>'); }).join('');
@@ -1935,6 +2007,13 @@
           html += disposition.map(function (lead) { return rowMarkup(lead, ''); }).join('');
           leadsDashboard.innerHTML = html + '</tbody></table>';
         }
+        document.getElementById('btn-close-lead-answers').addEventListener('click', closeLeadAnswers);
+        leadAnswersModal.addEventListener('click', function (event) {
+          if (event.target === leadAnswersModal) closeLeadAnswers();
+        });
+        document.addEventListener('keydown', function (event) {
+          if (event.key === 'Escape' && !leadAnswersModal.hidden) closeLeadAnswers();
+        });
         document.getElementById('btn-leads-refresh').addEventListener('click', function () { void refreshLeads(); });
         document.getElementById('btn-leads-harvest').addEventListener('click', async function () {
           await fetch('/run/harvest-leads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ headless: chkHeadless.checked }) });
@@ -1942,7 +2021,14 @@
         });
         leadsDashboard.addEventListener('click', async function (event) {
           const button = event.target.closest('[data-lead-action]');
-          if (!button || button.dataset.leadAction === 'answers') return;
+          if (!button) return;
+          if (button.dataset.leadAction === 'answers') {
+            leadAnswersTitle.textContent = (button.dataset.name || 'Lead') + ' answers';
+            leadAnswersBody.innerHTML = button.dataset.answers || '<p>No answers recorded.</p>';
+            leadAnswersModal.hidden = false;
+            document.getElementById('btn-close-lead-answers').focus();
+            return;
+          }
           const action = button.dataset.leadAction;
           await fetch('/run/leads/' + encodeURIComponent(button.dataset.email) + '/' + (action === 'email' ? 'email' : action), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ headless: chkHeadless.checked }) });
           void refreshLeads();
